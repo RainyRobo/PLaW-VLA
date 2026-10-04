@@ -1,0 +1,29 @@
+# Run with:
+# docker compose -f scripts/docker/compose.yml up --build
+services:
+  plaw_vla_server:
+    image: plaw_vla_server
+    build:
+      context: ../..
+      dockerfile: scripts/docker/serve_policy.Dockerfile
+    init: true
+    tty: true
+    network_mode: host
+    # Mount the model/data cache inside the container.
+    # Populate aws credential inside the container.
+    volumes:
+      - $PWD:/app
+      - ${PLAW_VLA_DATA_HOME:-~/.cache/plaw-vla}:/plaw_vla_assets
+    environment:
+      - SERVER_ARGS
+      - PLAW_VLA_DATA_HOME=/plaw_vla_assets
+      - IS_DOCKER=true
+
+    # Comment out this block if not running on a machine with GPUs.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

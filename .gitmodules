@@ -1,0 +1,15 @@
+[submodule "third_party/libero"]
+	path = third_party/libero
+	url = https://github.com/Lifelong-Robot-Learning/LIBERO.git
+[submodule "third_party/aloha"]
+	path = third_party/aloha
+	url = https://github.com/Physical-Intelligence/aloha.git
+[submodule "third_party/vjepa2"]
+	path = third_party/vjepa2
+	url = https://github.com/facebookresearch/vjepa2.git
+[submodule "third_party/robotwin"]
+	path = third_party/robotwin
+	url = https://github.com/robotwin-Platform/RoboTwin.git
+[submodule "third_party/libero-plus"]
+	path = third_party/libero-plus
+	url = https://github.com/sylvestf/LIBERO-plus.git

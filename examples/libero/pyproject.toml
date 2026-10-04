@@ -1,0 +1,35 @@
+[project]
+name = "libero-example"
+version = "0.1.0"
+description = "Python environment definition for the openpi LIBERO evaluation client"
+requires-python = ">=3.8,<3.9"
+dependencies = [
+    "bddl==1.0.1",
+    "easydict==1.9",
+    "future==0.18.2",
+    "gym==0.25.2",
+    "imageio[ffmpeg]==2.35.1",
+    "matplotlib==3.5.3",
+    "numpy==1.22.4",
+    "opencv-python==4.6.0.66",
+    "openpi-client",
+    "PyYAML==6.0.2",
+    "robosuite==1.4.1",
+    "scipy==1.10.1",
+    "setuptools<81",
+    "torch==1.11.0+cu113",
+    "tqdm==4.67.1",
+    "tyro==0.9.2",
+]
+
+[tool.uv]
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
+
+[tool.uv.sources]
+openpi-client = { path = "../../packages/openpi-client", editable = true }
+torch = { index = "pytorch-cu113" }
+
+[[tool.uv.index]]
+name = "pytorch-cu113"
+url = "https://download.pytorch.org/whl/cu113"
+explicit = true

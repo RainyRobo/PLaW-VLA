@@ -1,0 +1,42 @@
+# Run with:
+# docker compose -f examples/simple_client/compose.yml up --build
+services:
+  runtime:
+    image: simple_client
+    depends_on:
+      - plaw_vla_server
+    build:
+      context: ../..
+      dockerfile: examples/simple_client/Dockerfile
+    init: true
+    tty: true
+    network_mode: host
+    volumes:
+      - $PWD:/app
+    environment:
+      - SERVER_ARGS  
+
+  plaw_vla_server:
+    image: plaw_vla_server
+    build:
+      context: ../..
+      dockerfile: scripts/docker/serve_policy.Dockerfile
+    init: true
+    tty: true
+    network_mode: host
+    volumes:
+      - $PWD:/app
+      - ${PLAW_VLA_DATA_HOME:-~/.cache/plaw-vla}:/plaw_vla_assets
+    environment:
+      - SERVER_ARGS
+      - PLAW_VLA_DATA_HOME=/plaw_vla_assets
+      - IS_DOCKER=true
+
+    # Comment out this block if not running on a machine with GPUs.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
