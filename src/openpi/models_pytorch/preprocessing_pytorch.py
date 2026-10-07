@@ -7,7 +7,7 @@ import torch
 
 from openpi.shared import image_tools
 
-logger = logging.getLogger("plaw_vla")
+logger = logging.getLogger(__name__)
 
 # Constants moved from model.py
 IMAGE_KEYS = (

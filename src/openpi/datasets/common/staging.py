@@ -86,7 +86,7 @@ def resolve_staging_root(
     base = requested_root.expanduser().resolve() if requested_root is not None else default_staging_base()
     base.mkdir(parents=True, exist_ok=True)
     digest = hashlib.sha1(str(output_root).encode("utf-8"), usedforsecurity=False).hexdigest()[:10]
-    return (base / f"openpi-stage-{label}-{digest}").resolve()
+    return (base / f"dataset-stage-{label}-{digest}").resolve()
 
 
 def remove_tree(path: Path) -> None:

@@ -7,7 +7,7 @@ if [[ -n "${CUDA_HOME:-}" ]]; then export PATH="${CUDA_HOME}/bin:${PATH}"; fi
 command -v nvcc >/dev/null || { echo "RoboTwin native extensions require a CUDA 12.8 toolkit (nvcc). Set CUDA_HOME if needed." >&2; exit 1; }
 export UV_LINK_MODE=copy
 export MAX_JOBS="${MAX_JOBS:-4}"
-export TORCH_EXTENSIONS_DIR="${TORCH_EXTENSIONS_DIR:-${HOME}/.cache/plaw-vla/robotwin/torch-extensions}"
+export TORCH_EXTENSIONS_DIR="${TORCH_EXTENSIONS_DIR:-${HOME}/.cache/robot_policy/robotwin/torch-extensions}"
 mkdir -p "${TORCH_EXTENSIONS_DIR}"
 # Install Torch before building extensions whose setup imports it.
 uv sync --project "${SCRIPT_DIR}" --python 3.10 --frozen --group client --group curobo \

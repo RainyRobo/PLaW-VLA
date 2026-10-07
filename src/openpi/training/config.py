@@ -2321,7 +2321,7 @@ def _libero_data(
     )
 
 
-def _plaw_model(
+def _policy_model(
     *,
     wm_loss_dropout_alpha: float = 0.0,
     vjepa2_variant: str = "vitl-256",
@@ -2376,7 +2376,7 @@ def _stage_train_config(
         name=name,
         exp_name=name,
         project_name="plaw-vla",
-        model=_plaw_model(
+        model=_policy_model(
             wm_loss_dropout_alpha=wm_loss_dropout_alpha,
             vjepa2_variant=vjepa2_variant,
         ),

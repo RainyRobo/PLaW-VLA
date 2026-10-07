@@ -4,7 +4,7 @@ RoboTwin and LIBERO-Plus have dedicated clients and remain **planned support**. 
 
 ## RoboTwin
 
-The client targets canonical 16D dual-arm EEF actions (`left xyz, qwqxqyqz, gripper`, then `right`). It requires Linux, the CUDA 12.8 development toolkit, and a compatible GPU driver. PyTorch3D and cuRobo are built from pinned commits in their official repositories; build caches default to `~/.cache/plaw-vla/robotwin/`.
+The client targets canonical 16D dual-arm EEF actions (`left xyz, qwqxqyqz, gripper`, then `right`). It requires Linux, the CUDA 12.8 development toolkit, and a compatible GPU driver. PyTorch3D and cuRobo are built from pinned commits in their official repositories; build caches default to `~/.cache/robot_policy/robotwin/`.
 
 ```bash
 git submodule update --init third_party/robotwin
@@ -44,7 +44,7 @@ git submodule update --init third_party/libero-plus
 uv sync --project examples/libero_plus --python 3.8 --frozen
 ```
 
-Install the ImageMagick runtime library (`libmagickwand-dev` on Ubuntu) for the upstream texture loader. Follow [the upstream asset instructions](https://github.com/sylvestf/LIBERO-plus) and place the extracted `assets` directory at `third_party/libero-plus/libero/libero/assets`. An external asset directory can be symlinked there; upstream scene loaders require that location. The client path configuration defaults to `~/.cache/plaw-vla/libero-plus`, or `LIBERO_PLUS_CONFIG_PATH`.
+Install the ImageMagick runtime library (`libmagickwand-dev` on Ubuntu) for the upstream texture loader. Follow [the upstream asset instructions](https://github.com/sylvestf/LIBERO-plus) and place the extracted `assets` directory at `third_party/libero-plus/libero/libero/assets`. An external asset directory can be symlinked there; upstream scene loaders require that location. The client path configuration defaults to `~/.cache/robot_policy/libero-plus`, or `LIBERO_PLUS_CONFIG_PATH`.
 
 Use the LIBERO policy server from [the main guide](../README.md#libero-evaluation), then run:
 

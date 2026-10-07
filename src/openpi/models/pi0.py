@@ -15,7 +15,7 @@ import openpi.models.gemma as _gemma
 import openpi.models.siglip as _siglip
 from openpi.shared import array_typing as at
 
-logger = logging.getLogger("plaw_vla")
+logger = logging.getLogger(__name__)
 
 
 def make_attn_mask(input_mask, mask_ar):

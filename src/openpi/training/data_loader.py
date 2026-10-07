@@ -111,7 +111,7 @@ class _HFColumnSequenceCompat:
 
 def _patch_lerobot_hf_dataset_column_access() -> None:
     """Patch LeRobot to wrap local HF datasets with `_HFColumnSequenceCompat` once."""
-    if getattr(lerobot_dataset.LeRobotDataset.load_hf_dataset, "_plaw_vla_column_compat", False):
+    if getattr(lerobot_dataset.LeRobotDataset.load_hf_dataset, "_hf_column_access_patched", False):
         return
 
     original_load_hf_dataset = lerobot_dataset.LeRobotDataset.load_hf_dataset
@@ -122,7 +122,7 @@ def _patch_lerobot_hf_dataset_column_access() -> None:
             return hf_dataset
         return _HFColumnSequenceCompat(hf_dataset)
 
-    _patched_load_hf_dataset._plaw_vla_column_compat = True  # type: ignore[attr-defined]
+    _patched_load_hf_dataset._hf_column_access_patched = True  # type: ignore[attr-defined]
     lerobot_dataset.LeRobotDataset.load_hf_dataset = _patched_load_hf_dataset
 
 
@@ -155,7 +155,7 @@ def _retryable_bad_sample_log_path() -> pathlib.Path:
     raw_path = os.environ.get("BAD_SAMPLE_LOG_PATH")
     if raw_path:
         return pathlib.Path(raw_path).expanduser()
-    return pathlib.Path.cwd() / "plaw_vla_bad_samples.log"
+    return pathlib.Path.cwd() / "bad_samples.log"
 
 
 def _max_bad_sample_retries() -> int:

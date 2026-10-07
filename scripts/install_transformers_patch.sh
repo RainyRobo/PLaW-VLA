@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Apply the PLaW Transformers patch to an isolated virtual environment.
+# Apply the project's Transformers patch to an isolated virtual environment.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT}"
@@ -41,5 +41,5 @@ for path in source.rglob("*.py"):
 from transformers.models.siglip import check
 if not check.check_whether_transformers_replace_is_installed_correctly():
     raise SystemExit("Transformers patch verification failed.")
-print(f"PLaW Transformers patch verified in {target}")
+print(f"Transformers patch verified in {target}")
 PY

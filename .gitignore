@@ -5,7 +5,7 @@ wandb/
 logs/
 debug/
 results/
-plaw_vla_bad_samples.log
+bad_samples.log
 
 # Local editor / linter caches.
 .ruff_cache/

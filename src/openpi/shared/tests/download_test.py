@@ -6,8 +6,8 @@ import openpi.shared.download as download
 
 
 @pytest.fixture(scope="session", autouse=True)
-def set_plaw_vla_data_home(tmp_path_factory):
-    temp_dir = tmp_path_factory.mktemp("plaw_vla_data")
+def set_data_home(tmp_path_factory):
+    temp_dir = tmp_path_factory.mktemp("cached_data")
     with pytest.MonkeyPatch().context() as mp:
         mp.setenv("DATA_HOME", str(temp_dir))
         yield

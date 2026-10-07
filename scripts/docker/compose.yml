@@ -1,8 +1,8 @@
 # Run with:
 # docker compose -f scripts/docker/compose.yml up --build
 services:
-  plaw_vla_server:
-    image: plaw_vla_server
+  policy_server:
+    image: policy_server
     build:
       context: ../..
       dockerfile: scripts/docker/serve_policy.Dockerfile
@@ -12,7 +12,7 @@ services:
     # Mount the model/data cache inside the container.
     volumes:
       - $PWD:/app
-      - ${DATA_HOME:-~/.cache/plaw-vla}:/model_assets
+      - ${DATA_HOME:-~/.cache/robot_policy}:/model_assets
     environment:
       - SERVER_ARGS
       - DATA_HOME=/model_assets

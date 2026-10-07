@@ -11,7 +11,7 @@ git submodule update --init third_party/libero
 uv sync --project examples/libero --python 3.8 --frozen
 ```
 
-The client creates its LIBERO path configuration automatically in `~/.cache/plaw-vla/libero`. Set `LIBERO_CONFIG_PATH` to use another location. The policy server runs in the root environment.
+The client creates its LIBERO path configuration automatically in `~/.cache/robot_policy/libero`. Set `LIBERO_CONFIG_PATH` to use another location. The policy server runs in the root environment.
 
 ## Evaluation
 

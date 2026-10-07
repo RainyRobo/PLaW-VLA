@@ -4,7 +4,7 @@ services:
   runtime:
     image: simple_client
     depends_on:
-      - plaw_vla_server
+      - policy_server
     build:
       context: ../..
       dockerfile: examples/simple_client/Dockerfile
@@ -14,8 +14,8 @@ services:
     environment:
       - CLIENT_ARGS
 
-  plaw_vla_server:
-    image: plaw_vla_server
+  policy_server:
+    image: policy_server
     build:
       context: ../..
       dockerfile: scripts/docker/serve_policy.Dockerfile
@@ -24,7 +24,7 @@ services:
     network_mode: host
     volumes:
       - $PWD:/app
-      - ${DATA_HOME:-~/.cache/plaw-vla}:/model_assets
+      - ${DATA_HOME:-~/.cache/robot_policy}:/model_assets
     environment:
       - SERVER_ARGS
       - DATA_HOME=/model_assets

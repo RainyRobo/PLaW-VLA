@@ -17,7 +17,7 @@ import fsspec.generic
 import tqdm_loggable.auto as tqdm
 
 _DATA_HOME = "DATA_HOME"
-DEFAULT_CACHE_DIR = "~/.cache/plaw-vla"
+DEFAULT_CACHE_DIR = "~/.cache/robot_policy"
 
 logger = logging.getLogger(__name__)
 

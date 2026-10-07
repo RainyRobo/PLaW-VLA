@@ -154,8 +154,8 @@ Other suites are `libero_object`, `libero_goal`, and `libero_10`. See [the LIBER
 - [x] ~~Three-stage training pipeline~~
 - [x] ~~Local data conversion and pretraining recipes~~
 - [x] ~~LIBERO fine-tuning and evaluation~~
-- [ ] Support RoboTwin
-- [ ] Support LIBERO-Plus
+- [ ] RoboTwin fine-tuning and evaluation
+- [ ] LIBERO-Plus fine-tuning and evaluation
 
 ## License
 

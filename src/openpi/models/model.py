@@ -23,7 +23,7 @@ from openpi.models_pytorch import pi0_pytorch
 from openpi.shared import image_tools
 import openpi.shared.array_typing as at
 
-logger = logging.getLogger("plaw_vla")
+logger = logging.getLogger(__name__)
 
 # Type variable for array types (JAX arrays, PyTorch tensors, or numpy arrays)
 ArrayT = TypeVar("ArrayT", bound=jax.Array | torch.Tensor | np.ndarray)

@@ -32,7 +32,7 @@ if str(LIBERO_PLUS_SRC_ROOT) not in sys.path:
 
 
 def _ensure_libero_plus_config() -> None:
-    config_root = pathlib.Path(os.environ.get("LIBERO_PLUS_CONFIG_PATH", "~/.cache/plaw-vla/libero-plus")).expanduser()
+    config_root = pathlib.Path(os.environ.get("LIBERO_PLUS_CONFIG_PATH", "~/.cache/robot_policy/libero-plus")).expanduser()
     if not config_root.is_absolute():
         config_root = PROJECT_ROOT / config_root
 
