@@ -69,7 +69,7 @@ GIT_LFS_SKIP_SMUDGE=1 uv sync --python 3.12 --frozen
 bash scripts/install_transformers_patch.sh
 ```
 
-The training and policy environment uses PyTorch with CUDA 12.8. The patch installer checks the pinned Transformers version and installs the PLaW-VLA changes only in the project virtual environment. Run it again after synchronizing or recreating that environment. Conversion tools and simulator clients use separate environments.
+The training and policy environment uses PyTorch with CUDA 12.8. The patch installer checks the pinned Transformers version and installs the PLaW-VLA changes only in the project virtual environment. Run it again after synchronizing or recreating that environment. Conversion tools and simulator clients use separate environments. For a containerized policy server, see [Docker](docs/docker.md).
 
 ## Models and data
 

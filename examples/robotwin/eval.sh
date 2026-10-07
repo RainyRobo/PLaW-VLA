@@ -80,6 +80,10 @@ SAVE_ROOT=""
 
 # ---------------- parse args ------------------------------------------------
 while [[ $# -gt 0 ]]; do
+    if [[ "$1" == --* && "$1" != --help && $# -lt 2 ]]; then
+        echo "[eval] missing value for $1" >&2
+        exit 1
+    fi
     case "$1" in
         --tasks)        TASKS_SPEC="$2"; shift 2 ;;
         --checkpoint)   CHECKPOINT="$2"; shift 2 ;;
@@ -123,6 +127,13 @@ case "${VIDEO_MODE}" in
     none|failed|all) ;;
     *) echo "[eval] --video must be one of: none, failed, all (got: ${VIDEO_MODE})" >&2; exit 1 ;;
 esac
+[[ "${SEED}" =~ ^[0-9]+$ ]] || { echo "[eval] --seed must be nonnegative" >&2; exit 1; }
+[[ "${TEST_NUM}" =~ ^[0-9]+$ ]] && (( 10#${TEST_NUM} > 0 )) || {
+    echo "[eval] --test-num must be a positive integer" >&2; exit 1;
+}
+[[ "${SERVER_PORT}" =~ ^[0-9]+$ ]] && (( 10#${SERVER_PORT} >= 1 && 10#${SERVER_PORT} <= 65535 )) || {
+    echo "[eval] --server-port must be between 1 and 65535" >&2; exit 1;
+}
 
 # Resolve task spec to a concrete comma-separated list.
 case "${TASKS_SPEC}" in
@@ -167,6 +178,19 @@ fi
 
 IFS=',' read -ra TASK_ARR <<< "${TASKS}"
 IFS=',' read -ra GPU_ARR  <<< "${CLIENT_GPUS}"
+declare -A SEEN_TASKS SEEN_GPUS
+for task in "${TASK_ARR[@]}"; do
+    [[ "${task}" =~ ^[a-zA-Z0-9_]+$ && -z "${SEEN_TASKS[${task}]:-}" ]] || {
+        echo "[eval] task names must be nonempty, unique, and contain only letters, digits, underscores" >&2; exit 1;
+    }
+    SEEN_TASKS[${task}]=1
+done
+for gpu in "${GPU_ARR[@]}"; do
+    [[ "${gpu}" =~ ^[0-9]+$ && -z "${SEEN_GPUS[${gpu}]:-}" ]] || {
+        echo "[eval] client GPUs must be a nonempty list of unique numeric IDs" >&2; exit 1;
+    }
+    SEEN_GPUS[${gpu}]=1
+done
 
 # ---------------- export video-mode + asset-id passthrough ------------------
 export ROBOTWIN_VIDEO_MODE="${VIDEO_MODE}"
@@ -192,14 +216,23 @@ echo "============================================================"
 
 # ---------------- optional: spawn the policy server -------------------------
 SERVER_PID=""
-cleanup_server() {
+declare -A GPU_PID
+cleanup() {
+    for pid in "${GPU_PID[@]}"; do
+        kill "${pid}" 2>/dev/null || true
+    done
+    for pid in "${GPU_PID[@]}"; do
+        wait "${pid}" 2>/dev/null || true
+    done
     if [[ -n "${SERVER_PID}" ]] && kill -0 "${SERVER_PID}" 2>/dev/null; then
         echo "[eval] stopping server pid=${SERVER_PID}"
         kill "${SERVER_PID}" 2>/dev/null || true
         wait "${SERVER_PID}" 2>/dev/null || true
     fi
 }
-trap cleanup_server EXIT
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 if [[ -n "${SERVER_GPU}" ]]; then
     SERVER_LOG="${SAVE_ROOT}/logs/server_gpu${SERVER_GPU}.log"
@@ -211,9 +244,11 @@ if [[ -n "${SERVER_GPU}" ]]; then
         > "${SERVER_LOG}" 2>&1 &
     SERVER_PID=$!
     echo "[eval] server pid=${SERVER_PID}; waiting for readiness (TCP ${SERVER_HOST}:${SERVER_PORT}) ..."
+    SERVER_READY=0
     for _ in $(seq 1 150); do  # 150 * 2s = 5 min budget
         if (echo > "/dev/tcp/${SERVER_HOST}/${SERVER_PORT}") 2>/dev/null; then
             echo "[eval] server is up"
+            SERVER_READY=1
             break
         fi
         sleep 2
@@ -222,11 +257,13 @@ if [[ -n "${SERVER_GPU}" ]]; then
             exit 1
         fi
     done
+    if (( SERVER_READY == 0 )); then
+        echo "[eval] server did not become ready within five minutes; see ${SERVER_LOG}" >&2
+        exit 1
+    fi
 fi
 
 # ---------------- dispatch tasks across client GPUs -------------------------
-declare -A GPU_PID  # gpu -> running pid (or unset when idle)
-
 dispatch() {
     local gpu="$1"
     local task="$2"
@@ -246,7 +283,7 @@ dispatch() {
         if [[ -n "${ROBOTWIN_ASSET_ID:-}" ]]; then
             export ROBOTWIN_ASSET_ID
         fi
-        bash "${SCRIPT_DIR}/launch_client.sh" "${task_save}" "${task}"
+        exec bash "${SCRIPT_DIR}/launch_client.sh" "${task_save}" "${task}"
     ) > "${log}" 2>&1 &
     GPU_PID[${gpu}]=$!
 }
@@ -290,3 +327,6 @@ echo "[eval] DONE  ok=${TOTAL_OK}  fail=${TOTAL_FAIL}"
 echo "[eval] aggregate success rates:"
 echo "    python examples/robotwin/calc_stat.py ${SAVE_ROOT}"
 echo "============================================================"
+if (( TOTAL_FAIL > 0 )); then
+    exit 1
+fi

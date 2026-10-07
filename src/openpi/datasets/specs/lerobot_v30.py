@@ -573,6 +573,7 @@ def _write_sharded_data_files(
     data_metadata_by_episode: dict[int, dict[str, Any]] = {}
     output_stats: dict[str, dict[str, np.ndarray]] | None = None
     pending_episode_stats: list[dict[str, dict[str, np.ndarray]]] = []
+    source_shard_start_indices: dict[Path, int] = {}
 
     def flush_pending() -> None:
         nonlocal data_chunk_idx, data_file_idx, pending_size_mb
@@ -585,7 +586,14 @@ def _write_sharded_data_files(
 
     for source_data_path, grouped_episodes in _build_source_data_groups(episodes):
         grouped_episodes = sorted(grouped_episodes, key=lambda item: item.source.source_dataset_from_index)
-        first_dataset_from = grouped_episodes[0].source.source_dataset_from_index
+        if source_data_path not in source_shard_start_indices:
+            source_shard_start_indices.update(
+                {
+                    shard.path: shard.start_index
+                    for shard in _build_data_shard_ranges(grouped_episodes[0].source.source_root)
+                }
+            )
+        first_dataset_from = source_shard_start_indices[source_data_path]
 
         if select_source_columns is None:
             source_table = pq.read_table(source_data_path)
@@ -855,6 +863,10 @@ def merge_datasets(
         validate_bundles(bundles)
 
     output_root = output_root.expanduser().resolve()
+    for bundle in bundles:
+        source_root = bundle.root.expanduser().resolve()
+        if output_root == source_root or output_root in source_root.parents:
+            raise ValueError("Output directory must not be an input directory or an ancestor of it.")
     if output_root.exists():
         if not overwrite:
             return {

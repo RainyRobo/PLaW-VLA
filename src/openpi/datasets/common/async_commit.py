@@ -78,6 +78,7 @@ class OrderedAsyncBatchCommitter(Generic[T]):
         self._max_pending_batches = max(1, max_pending_batches)
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dataset-commit")
         self._pending_batches: deque[tuple[Future[None], list[T]]] = deque()
+        self._commit_error: BaseException | None = None
 
     def __enter__(self) -> OrderedAsyncBatchCommitter[T]:
         return self
@@ -94,7 +95,7 @@ class OrderedAsyncBatchCommitter(Generic[T]):
             committed += self._drain_one(block=True)
 
         batch_copy = list(batch)
-        future = self._executor.submit(self._commit_fn, batch_copy)
+        future = self._executor.submit(self._commit_batch, batch_copy)
         self._pending_batches.append((future, batch_copy))
         committed += self.drain_completed()
         return committed
@@ -118,6 +119,15 @@ class OrderedAsyncBatchCommitter(Generic[T]):
         if error is not None:
             raise error
         return committed
+
+    def _commit_batch(self, batch: list[T]) -> None:
+        if self._commit_error is not None:
+            raise RuntimeError("An earlier dataset commit failed; later batches cannot be written.") from self._commit_error
+        try:
+            self._commit_fn(batch)
+        except BaseException as error:
+            self._commit_error = error
+            raise
 
     def _drain_one(self, *, block: bool) -> int:
         if not self._pending_batches:

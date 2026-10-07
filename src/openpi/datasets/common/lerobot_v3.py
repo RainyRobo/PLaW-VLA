@@ -409,6 +409,7 @@ class DirectVideoLeRobotDataset(LeRobotDataset):
         pending.pending_paths = []
         pending.size_in_mb = 0.0
         pending.duration_s = 0.0
+        self._advance_pending_video_shard(pending)
         return True
 
     def _advance_pending_video_shard(self, pending: _PendingVideoShard) -> None:
@@ -458,7 +459,6 @@ class DirectVideoLeRobotDataset(LeRobotDataset):
 
                 if pending.pending_paths and pending.size_in_mb + episode_size_mb >= self.meta.video_files_size_in_mb:
                     self._flush_pending_video_shard(pending)
-                    self._advance_pending_video_shard(pending)
 
                 per_episode_video_metadata[episode_idx].update(
                     {

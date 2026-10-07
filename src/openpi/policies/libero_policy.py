@@ -1,7 +1,7 @@
 # Derived from openpi (Copyright 2024 Physical Intelligence, Inc.; Apache-2.0).
 # Modified for PLaW-VLA by the PLaW-VLA authors, 2026.
-import dataclasses
 from collections.abc import Sequence
+import dataclasses
 from typing import Literal
 
 import einops
@@ -11,13 +11,13 @@ from openpi import transforms
 from openpi.models import model as _model
 from openpi.policies import ee_pose_utils
 
-
 RAW_STATE_DIM = 8
 RAW_ACTION_DIM = 7
 CANONICAL_STATE_DIM = 8
 CANONICAL_ACTION_DIM = 8
 LIBERO_GRIPPER_OPENNESS_SCALE = 0.04
 LiberoStateGripperFormat = Literal["physical_width", "open_fraction"]
+LiberoStateInputFormat = Literal["two_finger_qpos", "canonical"]
 LiberoActionGripperFormat = Literal["signed_command", "binary_target", "absolute_physical_width"]
 
 
@@ -42,16 +42,6 @@ def _parse_image(image) -> np.ndarray:
         image = einops.rearrange(image, "c h w -> h w c")
 
     return image
-
-
-def _is_canonical_libero_state(state: np.ndarray) -> bool:
-    """Check if state is already in canonical format (quaternion orientation)."""
-    if state.shape[-1] != CANONICAL_STATE_DIM:
-        return False
-    # Canonical state has unit-quaternion orientation; raw state has rotation-vector.
-    quat = state[..., 3:7]
-    quat_norm = np.sum(np.square(quat), axis=-1)
-    return bool(np.all(np.abs(quat_norm - 1.0) < 0.5))
 
 
 def _canonicalize_libero_state(state: np.ndarray) -> np.ndarray:
@@ -206,6 +196,10 @@ class LiberoInputs(transforms.DataTransformFn):
     Set ``pretrain_world_model=True`` for vision(-language) pretraining
     where no state or actions are available.  State is zeroed and actions
     are omitted; a missing wrist image is filled with zeros.
+
+    ``state_input_format`` distinguishes xyz+rotation vector+two raw finger
+    positions from stored xyz+wxyz quaternion+one gripper value.  Stored
+    gripper units follow ``dataset_state_gripper_format``.
     """
 
     model_type: _model.ModelType = _model.ModelType.PI0
@@ -215,8 +209,13 @@ class LiberoInputs(transforms.DataTransformFn):
     image_keys: Sequence[str] = ("observation/image",)
     canonicalize_ee_pose_gripper: bool = False
     treat_actions_as_commands: bool = False
+    state_input_format: LiberoStateInputFormat = "two_finger_qpos"
     dataset_state_gripper_format: LiberoStateGripperFormat = "physical_width"
     dataset_action_gripper_format: LiberoActionGripperFormat = "signed_command"
+
+    def __post_init__(self) -> None:
+        if self.state_input_format not in {"two_finger_qpos", "canonical"}:
+            raise ValueError(f"Unsupported LIBERO state input format: {self.state_input_format!r}.")
 
     def __call__(self, data: dict) -> dict:
         # currently only support one image key, which should be the key of the image to be used for the world model
@@ -248,10 +247,7 @@ class LiberoInputs(transforms.DataTransformFn):
         else:
             state = np.asarray(data["observation/state"], dtype=np.float32)
             if self.canonicalize_ee_pose_gripper:
-                # Detect stored xyz+quaternion states directly.  Action
-                # presence is not a valid discriminator because inference
-                # requests contain no actions.
-                if _is_canonical_libero_state(state):
+                if self.state_input_format == "canonical":
                     state = _canonicalize_stored_libero_state(
                         state,
                         gripper_format=self.dataset_state_gripper_format,

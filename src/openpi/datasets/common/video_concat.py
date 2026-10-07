@@ -123,6 +123,8 @@ def _run_ffmpeg_concat(
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is None:
         raise FileNotFoundError("ffmpeg executable is not available.")
+    if output_video_path.exists() and not overwrite:
+        return
 
     concat_manifest_path: Path | None = None
     tmp_output_path: Path | None = None
@@ -131,11 +133,14 @@ def _run_ffmpeg_concat(
             tmp_file.write("ffconcat version 1.0\n")
             for input_path in input_video_paths:
                 resolved_input = Path(input_path).expanduser().resolve()
-                tmp_file.write(f"file '{resolved_input.as_posix()}'\n")
+                escaped_input = resolved_input.as_posix().replace("'", "'\\''")
+                tmp_file.write(f"file '{escaped_input}'\n")
             tmp_file.flush()
             concat_manifest_path = Path(tmp_file.name)
 
-        with tempfile.NamedTemporaryFile(suffix=output_video_path.suffix or ".mp4", delete=False) as tmp_named_file:
+        with tempfile.NamedTemporaryFile(
+            suffix=output_video_path.suffix or ".mp4", dir=output_video_path.parent, delete=False
+        ) as tmp_named_file:
             tmp_output_path = Path(tmp_named_file.name)
 
         command = [
@@ -143,7 +148,8 @@ def _run_ffmpeg_concat(
             "-hide_banner",
             "-loglevel",
             "error",
-            "-y" if overwrite else "-n",
+            "-xerror",
+            "-y",
             "-f",
             "concat",
             "-safe",
@@ -161,11 +167,9 @@ def _run_ffmpeg_concat(
             stderr = result.stderr.strip() or result.stdout.strip() or "unknown ffmpeg error"
             raise RuntimeError(f"ffmpeg concat failed for {output_video_path}: {stderr}")
 
-        if output_video_path.exists():
-            output_video_path.unlink()
-        shutil.move(tmp_output_path, output_video_path)
+        _validate_concatenated_video_file(tmp_output_path)
+        tmp_output_path.replace(output_video_path)
         tmp_output_path = None
-        _validate_concatenated_video_file(output_video_path)
     finally:
         if concat_manifest_path is not None:
             with suppress(FileNotFoundError):
@@ -189,24 +193,31 @@ def concatenate_video_files(
     is unavailable, we fall back to LeRobot's upstream helper.
     """
     output_video_path = Path(output_video_path)
-    if output_video_path.exists():
-        if not overwrite:
-            return
-        output_video_path.unlink()
+    if output_video_path.exists() and not overwrite:
+        return
 
-    output_video_path.parent.mkdir(parents=True, exist_ok=True)
     if not input_video_paths:
         raise FileNotFoundError("No input video paths provided.")
 
     resolved_inputs = [Path(path).expanduser().resolve() for path in input_video_paths]
+    for input_path in resolved_inputs:
+        if not input_path.is_file():
+            raise FileNotFoundError(f"Missing input video: {input_path}")
+    output_video_path.parent.mkdir(parents=True, exist_ok=True)
     if len(resolved_inputs) == 1:
-        shutil.copy2(resolved_inputs[0], output_video_path)
-        _validate_concatenated_video_file(output_video_path)
+        with tempfile.TemporaryDirectory(prefix="video-concat-", dir=output_video_path.parent) as temp_dir:
+            temp_output = Path(temp_dir) / output_video_path.name
+            shutil.copy2(resolved_inputs[0], temp_output)
+            _validate_concatenated_video_file(temp_output)
+            temp_output.replace(output_video_path)
         return
 
     try:
         _run_ffmpeg_concat(resolved_inputs, output_video_path, overwrite=overwrite)
     except FileNotFoundError:
         LOGGER.warning("ffmpeg is unavailable; falling back to LeRobot's PyAV video concat helper.")
-        _lerobot_concatenate_video_files(resolved_inputs, output_video_path, overwrite=overwrite)
-        _validate_concatenated_video_file(output_video_path)
+        with tempfile.TemporaryDirectory(prefix="video-concat-", dir=output_video_path.parent) as temp_dir:
+            temp_output = Path(temp_dir) / output_video_path.name
+            _lerobot_concatenate_video_files(resolved_inputs, temp_output, overwrite=True)
+            _validate_concatenated_video_file(temp_output)
+            temp_output.replace(output_video_path)

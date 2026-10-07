@@ -2,7 +2,7 @@
 
 The pretraining mixture is not distributed. Obtain each dataset from its original provider, follow its access and use terms, and convert local files with the tools below. The [licensing guide](licenses.md) distinguishes dataset terms from the code license. Converters default to local output and do not publish converted data automatically.
 
-All commands assume the repository root. Install FFmpeg and enough storage for both source data and converted shards. Each converter has a separate Python 3.12 environment pinned to the same LeRobot revision as training; its `uv.lock` is committed alongside `pyproject.toml`.
+All commands assume the repository root. Install FFmpeg and enough storage for both source data and converted shards. Each converter has a separate Python 3.12 environment pinned to the same LeRobot revision as training; its `uv.lock` is committed alongside `pyproject.toml`. Run conversion with the listed `uv --project` environment to install raw-data dependencies such as `h5py` and `ray`. Normalization, training, and serving use the root `.venv`.
 
 ## Obtain source data
 
@@ -14,12 +14,14 @@ All commands assume the repository root. Install FFmpeg and enough storage for b
 | LIBERO | [Official LIBERO data](https://github.com/Lifelong-Robot-Learning/LIBERO#datasets) | LIBERO demonstration HDF5 files |
 | EgoDex | [Apple](https://github.com/apple-aiml-research/ml-egodex) | Paired MP4 and HDF5 episodes |
 
-InternData-A1 and AgiBotWorld require accepting provider terms and signing in before access. Download the relevant simulation shards using the provider's instructions; extraction tools do not bypass access controls. Optional download helpers are:
+InternData-A1 and AgiBotWorld require accepting provider terms and signing in before access. After the [root installation](../README.md#installation), sign in with `.venv/bin/hf auth login`. Download the relevant simulation shards using the provider's instructions; extraction tools do not bypass access controls. Optional download helpers are:
 
 ```bash
-bash examples/agibotworld/download_agibotworld_data.sh --output-dir data/raw/agibotworld
+PATH="$PWD/.venv/bin:$PATH" bash examples/agibotworld/download_agibotworld_data.sh --output-dir data/raw/agibotworld
 bash examples/egodex/download_egodex.sh
 ```
+
+The AgiBotWorld helper prompts for Sample, Alpha, or Beta. To download a selected task without prompts, pass `--variant 2` (Alpha) or `--variant 3` (Beta) together with `--task-id <id>`.
 
 Select `data/raw/egodex` as the EgoDex helper's output directory. Keep train/test splits distinct when selecting data for pretraining. The RoboTwin EEF converter upgrades existing local LeRobot datasets; collecting the source trajectories is a separate upstream workflow.
 

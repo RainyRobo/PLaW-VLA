@@ -1,21 +1,34 @@
-# Run with:
-# docker compose -f scripts/docker/compose.yml up --build
+# Run from the repository root with POLICY_DIR set to a checkpoint step directory.
 services:
   policy_server:
-    image: policy_server
+    image: policy-server
     build:
       context: ../..
       dockerfile: scripts/docker/serve_policy.Dockerfile
     init: true
     tty: true
     network_mode: host
-    # Mount the model/data cache inside the container.
+    command:
+      - python
+      - scripts/serve_policy.py
+      - --env
+      - LIBERO
+      - --port
+      - ${POLICY_PORT:-8001}
+      - policy:checkpoint
+      - --policy.config=${CONFIG:-stage3_finetuning_libero}
+      - --policy.dir=/checkpoint
     volumes:
-      - $PWD:/app
+      - type: bind
+        source: ${POLICY_DIR:?Set POLICY_DIR to the checkpoint step directory}
+        target: /checkpoint
+        read_only: true
+        bind:
+          create_host_path: false
       - ${DATA_HOME:-~/.cache/robot_policy}:/model_assets
     environment:
-      - SERVER_ARGS
       - DATA_HOME=/model_assets
+      - HF_HOME=/model_assets/huggingface
 
     # Comment out this block if not running on a machine with GPUs.
     deploy:

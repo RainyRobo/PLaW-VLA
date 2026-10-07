@@ -2,7 +2,9 @@
 # Modified for PLaW-VLA by the PLaW-VLA authors, 2026.
 import ast
 from collections.abc import Iterator, Sequence
+import copy
 import dataclasses
+import hashlib
 import logging
 import multiprocessing
 import os
@@ -29,6 +31,8 @@ import numpy as np
 import torch
 
 import openpi.models.model as _model
+import openpi.policies.libero_policy as _libero_policy
+import openpi.shared.normalize as _normalize
 import openpi.training.config as _config
 import openpi.transforms as _transforms
 
@@ -693,6 +697,14 @@ class DataLoader(Protocol[T_co]):
         """Get optional checkpoint asset metadata for manifest generation."""
         raise NotImplementedError("Subclasses of DataLoader should implement checkpoint_asset_metadata.")
 
+    def state_dict(self) -> dict[str, Any]:
+        """Record the consumed data position and temporal sampling state."""
+        raise NotImplementedError("Subclasses of DataLoader should implement state_dict.")
+
+    def load_state_dict(self, state: dict[str, Any]) -> None:
+        """Restore data position before restoring main-process random state."""
+        raise NotImplementedError("Subclasses of DataLoader should implement load_state_dict.")
+
     def __iter__(self) -> Iterator[T_co]:
         raise NotImplementedError("Subclasses of DataLoader should implement __iter__.")
 
@@ -868,6 +880,12 @@ class WeightedGroupSampler(torch.utils.data.Sampler[int]):
     def set_epoch(self, epoch: int) -> None:
         self._epoch = int(epoch)
 
+    def resume_signature(self) -> dict[str, Any]:
+        return {
+            "group_weights": self._group_weights.tolist(),
+            "group_child_lengths": [values.tolist() for values in self._group_child_cumulative],
+        }
+
     def __iter__(self):
         generator = torch.Generator().manual_seed(self._seed + self._epoch * self._num_replicas + self._rank)
         remaining = self._num_samples
@@ -924,6 +942,13 @@ def _load_child_dataset(
     model_config: _model.BaseModelConfig,
     skip_norm_stats: bool,
 ) -> _LoadedChildDataset:
+    if not skip_norm_stats and child_config.repo_id != "fake":
+        required_keys = {"state", "actions"} if child_config.action_sequence_keys else {"state"}
+        if child_config.norm_stats is None or not required_keys.issubset(child_config.norm_stats):
+            raise ValueError(
+                f"Normalization assets for {child_config.repo_id!r} are missing the required "
+                f"statistics {sorted(required_keys)} (asset_id={child_config.asset_id!r})."
+            )
     child_start = time.perf_counter()
     ds = create_torch_dataset(child_config, action_horizon, model_config)
     ds = FaultTolerantDataset(
@@ -1430,6 +1455,7 @@ def create_torch_data_loader(
                 rank=torch.distributed.get_rank(),
                 shuffle=shuffle,
                 drop_last=True,
+                seed=seed,
             )
             local_batch_size = batch_size // torch.distributed.get_world_size()
         else:
@@ -1564,6 +1590,25 @@ def create_multi_torch_data_loader(
     )
 
 
+class _EpochRandomSampler(torch.utils.data.Sampler[int]):
+    """Rebuild a shuffled dataset pass from its seed and epoch."""
+
+    def __init__(self, dataset: Dataset, seed: int):
+        self._dataset = dataset
+        self._seed = seed
+        self._epoch = 0
+
+    def __len__(self) -> int:
+        return len(self._dataset)
+
+    def set_epoch(self, epoch: int) -> None:
+        self._epoch = epoch
+
+    def __iter__(self):
+        generator = torch.Generator().manual_seed(self._seed + self._epoch)
+        yield from torch.randperm(len(self), generator=generator).tolist()
+
+
 class TorchDataLoader:
     """Torch data loader implementation."""
 
@@ -1615,39 +1660,49 @@ class TorchDataLoader:
             )
         self._num_batches = num_batches
         self._epoch = 0
+        self._batch_offset = 0
+        self._prepared_iterator = None
+        self._seed = seed
 
         mp_context = None
         if num_workers > 0:
             mp_context = multiprocessing.get_context("spawn")
 
-        generator = torch.Generator()
-        generator.manual_seed(seed)
+        # Worker startup and shuffled indices need separate generators: creating
+        # workers must not consume the sampler's random stream.
+        self._worker_generator = torch.Generator().manual_seed(seed)
+        if sampler is None and shuffle:
+            sampler = _EpochRandomSampler(dataset, seed)
         self._data_loader = torch.utils.data.DataLoader(
             typing.cast(torch.utils.data.Dataset, dataset),
             batch_size=local_batch_size,
-            shuffle=(sampler is None and shuffle),  # Don't shuffle if using sampler
+            shuffle=False,
             sampler=sampler,
             num_workers=num_workers,
             multiprocessing_context=mp_context,
-            persistent_workers=num_workers > 0,
+            # Restart at dataset-pass boundaries so worker RNG streams can be
+            # reconstructed when resuming in a later epoch.
+            persistent_workers=False,
             pin_memory=torch.cuda.is_available(),
             collate_fn=_collate_fn,
             worker_init_fn=_worker_init_fn,
             drop_last=drop_last,
-            generator=generator,
+            generator=self._worker_generator,
         )
+        if len(self._data_loader) == 0:
+            raise ValueError("The sampler does not provide enough frames for one complete batch.")
 
     @property
     def torch_loader(self) -> torch.utils.data.DataLoader:
         return self._data_loader
 
     def set_epoch(self, epoch: int) -> None:
-        """Set the epoch used for the next dataset pass.
-
-        ``DistributedSampler`` derives its shuffle from this value. The training
-        loop sets the starting epoch on resume; each later pass increments it.
-        """
+        """Start a dataset pass at its first batch."""
+        if epoch < 0:
+            raise ValueError(f"epoch must be non-negative, got {epoch}.")
         self._epoch = int(epoch)
+        self._batch_offset = 0
+        self._prepared_iterator = None
         sampler = getattr(self._data_loader, "sampler", None)
         if sampler is not None and hasattr(sampler, "set_epoch"):
             sampler.set_epoch(self._epoch)
@@ -1656,13 +1711,67 @@ class TorchDataLoader:
         """Number of batches in one dataset pass."""
         return len(self._data_loader)
 
+    def _resume_signature(self) -> dict[str, Any]:
+        sampler = self._data_loader.sampler
+        signature = {
+            "dataset_size": len(self._data_loader.dataset),
+            "batch_size": self._data_loader.batch_size,
+            "num_workers": self._data_loader.num_workers,
+            "drop_last": self._data_loader.drop_last,
+            "seed": self._seed,
+            "sampler": type(sampler).__qualname__,
+            "sampler_seed": getattr(sampler, "seed", getattr(sampler, "_seed", None)),
+            "num_replicas": getattr(sampler, "num_replicas", getattr(sampler, "_num_replicas", 1)),
+            "rank": getattr(sampler, "rank", getattr(sampler, "_rank", 0)),
+        }
+        if isinstance(sampler, WeightedGroupSampler):
+            signature.update(sampler.resume_signature())
+        return signature
+
+    def state_dict(self) -> dict[str, Any]:
+        """Record the next consumed batch, independently of worker prefetch."""
+        epoch_delta, offset = divmod(self._batch_offset, len(self))
+        return {
+            "epoch": self._epoch + epoch_delta,
+            "batch_offset": offset,
+            "signature": self._resume_signature(),
+        }
+
+    def _new_epoch_iterator(self):
+        sampler = self._data_loader.sampler
+        if hasattr(sampler, "set_epoch"):
+            sampler.set_epoch(self._epoch)
+        self._worker_generator.manual_seed(self._seed + self._epoch)
+        return iter(self._data_loader)
+
+    def load_state_dict(self, state: dict[str, Any]) -> None:
+        """Seek before the trainer restores its RNG state and requests a batch.
+
+        Standard worker-local Python, NumPy and Torch random transforms are
+        replayed by rebuilding the epoch and discarding its consumed prefix.
+        Custom transforms with external state must manage that state themselves.
+        """
+        if state.get("signature") != self._resume_signature():
+            raise ValueError("Resume requires the original dataset, sampler, seed, batch size and worker count.")
+        epoch, offset = state.get("epoch"), state.get("batch_offset")
+        if not isinstance(epoch, int) or epoch < 0 or not isinstance(offset, int) or not 0 <= offset < len(self):
+            raise ValueError(f"Invalid data-loader resume position: epoch={epoch!r}, batch_offset={offset!r}.")
+        self.set_epoch(epoch)
+        data_iter = self._new_epoch_iterator()
+        for _ in range(offset):
+            next(data_iter)
+        self._batch_offset = offset
+        self._prepared_iterator = data_iter
+
     def __iter__(self):
         num_items = 0
         while True:
-            sampler = getattr(self._data_loader, "sampler", None)
-            if sampler is not None and hasattr(sampler, "set_epoch"):
-                sampler.set_epoch(self._epoch)
-            data_iter = iter(self._data_loader)
+            data_iter = self._prepared_iterator
+            self._prepared_iterator = None
+            if data_iter is None:
+                data_iter = self._new_epoch_iterator()
+                for _ in range(self._batch_offset):
+                    next(data_iter)
             while True:
                 if self._num_batches is not None and num_items >= self._num_batches:
                     return
@@ -1672,8 +1781,10 @@ class TorchDataLoader:
                     # The next pass must use a new shuffle. Leaving the epoch at 0
                     # makes every DDP pass repeat the same sample order.
                     self._epoch += 1
+                    self._batch_offset = 0
                     break
                 num_items += 1
+                self._batch_offset += 1
                 # For JAX, convert to sharded arrays; for PyTorch, return torch tensors
                 if self._sharding is not None:
                     yield jax.tree.map(lambda x: jax.make_array_from_process_local_data(self._sharding, x), batch)
@@ -1909,6 +2020,50 @@ class DataLoaderImpl(DataLoader):
 
     def set_epoch(self, epoch: int) -> None:
         self._data_loader.set_epoch(epoch)
+
+    def state_dict(self) -> dict[str, Any]:
+        return {
+            "data_loader": self._data_loader.state_dict(),
+            "temporal_rng": copy.deepcopy(self._temporal_rng.bit_generator.state),
+            "datasets": [
+                self._dataset_resume_signature(config)
+                for config in self._data_configs
+            ],
+        }
+
+    def load_state_dict(self, state: dict[str, Any]) -> None:
+        datasets = [
+            self._dataset_resume_signature(config)
+            for config in self._data_configs
+        ]
+        if state.get("datasets") != datasets:
+            raise ValueError("Resume requires the original data sources, normalization statistics and contracts.")
+        self._data_loader.load_state_dict(state["data_loader"])
+        self._temporal_rng.bit_generator.state = copy.deepcopy(state["temporal_rng"])
+
+    @staticmethod
+    def _dataset_resume_signature(config: _config.DataConfig) -> dict[str, Any]:
+        return {
+            "repo_id": config.repo_id,
+            "asset_id": config.asset_id,
+            "dataset_type": config.dataset_type,
+            "normalization_contract": config.normalization_contract,
+            "norm_stats_sha256": hashlib.sha256(_normalize.serialize_json(config.norm_stats).encode()).hexdigest()
+            if config.norm_stats
+            else None,
+            "use_quantile_norm": config.use_quantile_norm,
+            "libero_inputs": [
+                dataclasses.asdict(transform)
+                for transform in config.data_transforms.inputs
+                if isinstance(transform, _libero_policy.LiberoInputs)
+            ],
+            "world_model": dataclasses.asdict(config.world_model),
+            "action_sequence_keys": config.action_sequence_keys,
+            "action_sequence_offsets": config.action_sequence_offsets,
+            "action_time_step_s": config.action_time_step_s,
+            "action_time_start_s": config.action_time_start_s,
+            "action_sequence_time_offsets_s": config.action_sequence_time_offsets_s,
+        }
 
     def __len__(self) -> int:
         return len(self._data_loader)

@@ -25,6 +25,8 @@ For EEF action training, every target in a chunk is expressed relative to the **
 
 The Stage III LIBERO EEF dataset stores physical gripper widths. Its adapter canonicalizes them before the delta transform and records the convention in a normalization contract alongside the statistics. Raw LIBERO signed controller commands are a different representation and require an explicitly matching data config. Do not mix widths, open fractions, or signed commands without the corresponding adapter.
 
+`LeRobotLiberoDataConfig` defaults to `dataset_state_input_format="canonical"` for stored EEF poses; choose `"two_finger_qpos"` explicitly for raw states containing axis-angle orientation and two finger positions.
+
 ## Loading a checkpoint
 
 Use the checkpoint's original normalization statistics, action/gripper conventions, model dimensions, and temporal schedule. A step directory should include `model.safetensors` and its saved `assets/`; optimizer and training-state files are also needed for a training resume. Select the matching configuration with `--policy.config` when serving.

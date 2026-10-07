@@ -45,7 +45,6 @@ class Args:
     input_roots: tuple[Path, ...] = robotwin_datasets.DEFAULT_INPUT_ROOTS
     staging_root: Path | None = None
     embodiments: tuple[str, ...] = ()
-    link_mode: lerobot_v21.MergeLinkMode = "auto"
     overwrite: bool = False
     conversion_num_workers: int | None = None
     ray_temp_root: Path | None = None
@@ -138,11 +137,8 @@ def main(args: Args) -> None:
             args.summary_json.expanduser().resolve().write_text(json.dumps(summaries, indent=2), encoding="utf-8")
         print(json.dumps(summaries, indent=2))
         return
-    should_stage = args.staging_root is not None or args.link_mode != "copy"
     build_root = (
         staging.resolve_staging_root(output_root, label="robotwin-v3", requested_root=args.staging_root)
-        if should_stage
-        else None
     ) or output_root
     _validate_output_path(build_root, source_paths)
     using_staging = build_root != output_root
@@ -193,7 +189,7 @@ def main(args: Args) -> None:
                 summary = lerobot_v21.merge_datasets(
                     None,
                     build_root / embodiment,
-                    link_mode=args.link_mode,
+                    link_mode="copy",
                     overwrite=args.overwrite,
                     conversion_num_workers=workers,
                     bundles=bundles,

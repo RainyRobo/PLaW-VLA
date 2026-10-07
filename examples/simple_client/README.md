@@ -8,4 +8,4 @@ Start a LIBERO policy server as described in [the root README](../../README.md#l
 .venv/bin/python examples/simple_client/main.py --host localhost --port 8001 --num-steps 20
 ```
 
-Use `--timing-file /path/to/timing.parquet` to save timing samples. For real evaluation, use [the LIBERO client](../libero/README.md). To embed the WebSocket client in another Python environment, follow [remote inference](../../docs/remote_inference.md).
+Use `--timing-file /path/to/timing.parquet` to save timing samples. `--connect-timeout` and `--inference-timeout` set the connection and response waits in seconds. For real evaluation, use [the LIBERO client](../libero/README.md). To embed the WebSocket client in another Python environment, follow [remote inference](../../docs/remote_inference.md).

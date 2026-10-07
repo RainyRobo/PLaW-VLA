@@ -2,6 +2,7 @@
 # Modified for PLaW-VLA by the PLaW-VLA authors, 2026.
 import abc
 from collections.abc import Sequence
+import copy
 import dataclasses
 import enum
 import logging
@@ -255,9 +256,9 @@ class BaseModelConfig(abc.ABC):
 
     def load_pytorch(self, train_config, weight_path: str):
         logger.info(f"train_config: {train_config}")
-        if not hasattr(train_config.model, "training_stage"):
-            object.__setattr__(train_config.model, "training_stage", train_config.training_stage)
-        model = pi0_pytorch.PI0Pytorch(config=train_config.model)
+        model_config = copy.copy(train_config.model)
+        object.__setattr__(model_config, "training_stage", train_config.training_stage)
+        model = pi0_pytorch.PI0Pytorch(config=model_config)
         safetensors.torch.load_model(model, weight_path)
         return model
 

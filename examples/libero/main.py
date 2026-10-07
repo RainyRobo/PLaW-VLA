@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import collections
+from collections.abc import Sequence
+import contextlib
 import dataclasses
 import gc
 import logging
@@ -12,12 +14,14 @@ import math
 import multiprocessing as mp
 import os
 import pathlib
+import queue
+import re
 import sys
+import tempfile
 import time
 import traceback
-import warnings
-from collections.abc import Sequence
 from typing import Any, List, Tuple
+import warnings
 
 os.environ["PYTHONWARNINGS"] = "ignore"
 os.environ["NUMBA_DISABLE_PERFORMANCE_WARNINGS"] = "1"
@@ -48,7 +52,7 @@ def _ensure_libero_config() -> None:
 
     os.environ["LIBERO_CONFIG_PATH"] = str(config_root)
     config_root.mkdir(parents=True, exist_ok=True)
-    (config_root / "config.yaml").write_text(
+    config_text = (
         "\n".join(
             (
                 f"benchmark_root: {LIBERO_ROOT}",
@@ -58,9 +62,17 @@ def _ensure_libero_config() -> None:
                 f"assets: {LIBERO_ROOT / 'assets'}",
             )
         )
-        + "\n",
-        encoding="utf-8",
+        + "\n"
     )
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=config_root, prefix=".config-", suffix=".yaml", delete=False
+    ) as config_file:
+        temp_path = pathlib.Path(config_file.name)
+        config_file.write(config_text)
+    try:
+        temp_path.replace(config_root / "config.yaml")
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
 MPLCONFIGDIR_ROOT.mkdir(parents=True, exist_ok=True)
@@ -89,6 +101,8 @@ class Args:
     port: int = 8001
     resize_size: int = 224
     replan_steps: int = 5
+    connect_timeout: float = 30.0
+    inference_timeout: float = 60.0
 
     task_suite_name: str = "libero_spatial"
     task_ids: Tuple[int, ...] = ()
@@ -145,17 +159,17 @@ def _history_buffer_len(step_offsets: Sequence[int]) -> int:
     return 1 + max(-min(step_offsets), 0)
 
 
-def _select_temporal_frames(frames: Sequence[np.ndarray], step_offsets: Sequence[int]) -> np.ndarray:
+def _select_temporal_frames(frames: Sequence[np.ndarray], step_offsets: Sequence[int]) -> Tuple[np.ndarray, np.ndarray]:
+    """Sample the requested history, masking offsets before the first observation."""
     if not frames:
         raise ValueError("Expected at least one frame in the history buffer.")
 
     newest_idx = len(frames) - 1
-    min_available_offset = -newest_idx
-    available_offsets = [offset for offset in step_offsets if offset >= min_available_offset]
-    if not available_offsets:
-        available_offsets = [0]
-
-    return np.stack([frames[newest_idx + offset] for offset in available_offsets], axis=0)
+    frame_indices = [newest_idx + offset for offset in step_offsets]
+    return (
+        np.stack([frames[max(index, 0)] for index in frame_indices], axis=0),
+        np.asarray([index < 0 for index in frame_indices], dtype=bool),
+    )
 
 
 def _load_policy_input_spec(metadata: dict[str, Any]) -> _policy_input_spec.PolicyInputSpec:
@@ -167,6 +181,8 @@ def _load_policy_input_spec(metadata: dict[str, Any]) -> _policy_input_spec.Poli
 
     if input_spec.family != "libero":
         raise ValueError(f"Unsupported LIBERO input family: {input_spec.family!r}")
+    if not input_spec.image_keys:
+        raise ValueError("LIBERO policy input_spec must include image_keys.")
     if len(input_spec.temporal_image_keys) > 1:
         raise ValueError(
             "LIBERO evaluation currently supports at most one temporal image input, "
@@ -219,8 +235,11 @@ def run_single_episode(
     env.reset()
     obs = env.set_init_state(initial_state)
 
+    temporal_keys = set(input_spec.temporal_image_keys)
     action_plan = collections.deque()
     queue_image_history = collections.deque(maxlen=_history_buffer_len(input_spec.history_step_offsets))
+    if temporal_keys:
+        queue_image_history.append(preprocess_image(obs["agentview_image"], 256))
     replay_images: List[np.ndarray] = []
 
     max_steps = TASK_MAX_STEPS.get(args.task_suite_name, 300)
@@ -229,17 +248,16 @@ def run_single_episode(
     # The policy samples this buffer at its declared history step offsets.
     for _ in range(args.num_steps_wait):
         obs, _, _, _ = env.step(LIBERO_DUMMY_ACTION)
-        queue_image_history.append(preprocess_image(obs["agentview_image"], 256))
+        if temporal_keys:
+            queue_image_history.append(preprocess_image(obs["agentview_image"], 256))
 
     success = False
     try:
         for _ in range(max_steps):
             front_image = preprocess_image(obs["agentview_image"], args.resize_size)
             wrist_image = preprocess_image(obs["robot0_eye_in_hand_image"], args.resize_size)
-            front_history_image = preprocess_image(obs["agentview_image"], 256)
-
-            replay_images.append(front_image)
-            queue_image_history.append(front_history_image)
+            if args.record_video != "none":
+                replay_images.append(front_image)
 
             if not action_plan:
                 robot_state = np.concatenate(
@@ -248,12 +266,13 @@ def run_single_episode(
                         _quat2axisangle(obs["robot0_eef_quat"]),
                         obs["robot0_gripper_qpos"],
                     )
-                )
+                ).astype(np.float32)
+                if robot_state.shape != (8,) or not np.all(np.isfinite(robot_state)):
+                    raise ValueError(f"Expected a finite 8D raw LIBERO state, got {robot_state!r}.")
                 request = {}
-                temporal_keys = set(input_spec.temporal_image_keys)
                 for image_key in input_spec.image_keys:
                     if image_key in temporal_keys:
-                        request[image_key] = _select_temporal_frames(
+                        request[image_key], request[f"{image_key}_is_pad"] = _select_temporal_frames(
                             list(queue_image_history),
                             input_spec.history_step_offsets,
                         )
@@ -264,7 +283,7 @@ def run_single_episode(
                 if input_spec.prompt_key is not None:
                     request[input_spec.prompt_key] = task_description
 
-                action_chunk = np.asarray(client.infer(request)["actions"])
+                action_chunk = np.asarray(client.infer(request)["actions"], dtype=np.float32)
                 if (
                     action_chunk.ndim != 2
                     or action_chunk.shape[0] == 0
@@ -274,10 +293,14 @@ def run_single_episode(
                         "Policy server returned invalid action chunk shape "
                         f"{action_chunk.shape}; expected [positive horizon, {len(LIBERO_DUMMY_ACTION)}]."
                     )
+                if not np.all(np.isfinite(action_chunk)):
+                    raise ValueError("Policy server returned non-finite LIBERO actions.")
                 action_plan.extend(action_chunk[: args.replan_steps])
 
             action = action_plan.popleft()
             obs, _, done, _ = env.step(action.tolist())
+            if temporal_keys:
+                queue_image_history.append(preprocess_image(obs["agentview_image"], 256))
 
             if done:
                 success = True
@@ -306,42 +329,46 @@ def _episode_worker(
     result_queue,
 ) -> None:
     _suppress_warnings()
-    devnull = open(os.devnull, "w", encoding="utf-8")
-    sys.stdout = devnull
-    sys.stderr = devnull
-    _, _, OffScreenRenderEnv = _lazy_imports()
-
     try:
-        args = Args(**args_dict)
-        env = OffScreenRenderEnv(
-            bddl_file_name=task_bddl_file,
-            camera_heights=LIBERO_ENV_RESOLUTION,
-            camera_widths=LIBERO_ENV_RESOLUTION,
-        )
-        env.seed(args.seed)
-        client = _websocket_client_policy.WebsocketClientPolicy(host, port)
-        input_spec = _load_policy_input_spec(client.get_server_metadata())
+        with open(os.devnull, "w", encoding="utf-8") as devnull:
+            with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
+                _, _, OffScreenRenderEnv = _lazy_imports()
+                args = Args(**args_dict)
+                np.random.seed(args.seed)
+                env = OffScreenRenderEnv(
+                    bddl_file_name=task_bddl_file,
+                    camera_heights=LIBERO_ENV_RESOLUTION,
+                    camera_widths=LIBERO_ENV_RESOLUTION,
+                )
+                try:
+                    env.seed(args.seed)
+                    with _websocket_client_policy.WebsocketClientPolicy(
+                        host,
+                        port,
+                        connect_timeout=args.connect_timeout,
+                        inference_timeout=args.inference_timeout,
+                    ) as client:
+                        input_spec = _load_policy_input_spec(client.get_server_metadata())
+                        is_success, replay_images = run_single_episode(
+                            env=env,
+                            task_description=task_description,
+                            client=client,
+                            initial_state=initial_state,
+                            args=args,
+                            input_spec=input_spec,
+                        )
+                finally:
+                    env.close()
+                    del env
+                    gc.collect()
 
-        is_success, replay_images = run_single_episode(
-            env=env,
-            task_description=task_description,
-            client=client,
-            initial_state=initial_state,
-            args=args,
-            input_spec=input_spec,
-        )
-        env.close()
-        del env
-        gc.collect()
-
-        should_save = (
-            bool(video_path)
-            and replay_images
-            and (args.record_video == "all" or (args.record_video == "failure" and not is_success))
-        )
-        if should_save:
-            imageio.mimwrite(video_path, [np.asarray(x) for x in replay_images], fps=10, macro_block_size=1)
-
+                should_save = (
+                    bool(video_path)
+                    and replay_images
+                    and (args.record_video == "all" or (args.record_video == "failure" and not is_success))
+                )
+                if should_save:
+                    imageio.mimwrite(video_path, [np.asarray(x) for x in replay_images], fps=10, macro_block_size=1)
         result_queue.put((is_success, ""))
     except Exception:
         result_queue.put((False, traceback.format_exc()))
@@ -376,29 +403,56 @@ def _run_episode_in_subprocess(
             result_queue,
         ),
     )
-    proc.start()
-    proc.join(timeout=timeout)
+    started = False
+    try:
+        proc.start()
+        started = True
+        proc.join(timeout=timeout)
+        if proc.is_alive():
+            raise TimeoutError(f"LIBERO episode exceeded its {timeout}s subprocess timeout.")
+        if proc.exitcode != 0:
+            raise RuntimeError(f"LIBERO episode subprocess exited with code {proc.exitcode}.")
+        try:
+            is_success, error_text = result_queue.get(timeout=1.0)
+        except queue.Empty as exc:
+            raise RuntimeError("LIBERO episode subprocess exited without reporting a result.") from exc
+        if error_text:
+            raise RuntimeError("LIBERO episode subprocess failed:\n" + error_text.rstrip())
+        return bool(is_success)
+    finally:
+        if started and proc.is_alive():
+            proc.kill()
+            proc.join()
+        result_queue.close()
+        result_queue.join_thread()
+        if started:
+            proc.close()
 
-    if proc.is_alive():
-        _log("[WARN] Episode subprocess timed out; killing it and treating the rollout as failure.")
-        proc.kill()
-        proc.join()
-        return False
 
-    if proc.exitcode != 0:
-        _log(f"[WARN] Episode subprocess exited with code {proc.exitcode}; treating the rollout as failure.")
-        return False
-
-    if result_queue.empty():
-        return False
-
-    is_success, error_text = result_queue.get_nowait()
-    if error_text:
-        _log("[ERROR] Episode subprocess failed:\n" + error_text.rstrip())
-    return bool(is_success)
+def _validate_args(args: Args) -> None:
+    for name in ("port", "resize_size", "replan_steps", "num_trials_per_task"):
+        if getattr(args, name) <= 0:
+            raise ValueError(f"{name} must be positive, got {getattr(args, name)}.")
+    if args.port > 65535:
+        raise ValueError(f"port must be at most 65535, got {args.port}.")
+    if args.num_steps_wait < 0:
+        raise ValueError(f"num_steps_wait must be nonnegative, got {args.num_steps_wait}.")
+    for name in ("connect_timeout", "inference_timeout"):
+        value = getattr(args, name)
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"{name} must be finite and positive, got {value}.")
+    if not 0 <= args.seed < 2**32:
+        raise ValueError(f"seed must be between 0 and {2**32 - 1}, got {args.seed}.")
+    if args.record_video not in {"none", "failure", "all"}:
+        raise ValueError(f"record_video must be one of none/failure/all, got {args.record_video!r}.")
+    if args.task_suite_name not in TASK_MAX_STEPS:
+        raise ValueError(f"Unknown task suite: {args.task_suite_name!r}.")
+    if len(set(args.task_ids)) != len(args.task_ids):
+        raise ValueError(f"task_ids must not contain duplicates, got {args.task_ids}.")
 
 
 def eval_libero(args: Args) -> None:
+    _validate_args(args)
     if not (LIBERO_SRC_ROOT / "libero").is_dir():
         raise FileNotFoundError(
             f"LIBERO submodule is missing at {LIBERO_SRC_ROOT}. Run: git submodule update --init --recursive"
@@ -406,20 +460,7 @@ def eval_libero(args: Args) -> None:
     mp.set_start_method("spawn", force=True)
     np.random.seed(args.seed)
 
-    if args.replan_steps <= 0:
-        raise ValueError(f"replan_steps must be > 0, got {args.replan_steps}")
-    if args.num_trials_per_task <= 0:
-        raise ValueError(f"num_trials_per_task must be > 0, got {args.num_trials_per_task}")
-    if args.record_video not in {"none", "failure", "all"}:
-        raise ValueError(f"record_video must be one of none/failure/all, got {args.record_video!r}")
-
     benchmark, get_libero_path, _ = _lazy_imports()
-
-    client = _websocket_client_policy.WebsocketClientPolicy(args.host, args.port)
-    server_metadata = client.get_server_metadata()
-    input_spec = _load_policy_input_spec(server_metadata)
-    _log(f"Server metadata: {server_metadata}")
-    _log(f"Resolved policy input spec: {input_spec}")
     benchmark_dict = benchmark.get_benchmark_dict()
     if args.task_suite_name not in benchmark_dict:
         raise ValueError(f"Unknown task suite: {args.task_suite_name}")
@@ -432,6 +473,17 @@ def eval_libero(args: Args) -> None:
         if task_id < 0 or task_id >= task_suite.n_tasks:
             raise ValueError(f"task_id {task_id} out of range [0, {task_suite.n_tasks})")
     _log(f"Running task IDs: {task_id_list}")
+    _log(f"Evaluation seed: {args.seed}; requested trials per task: {args.num_trials_per_task}")
+    with _websocket_client_policy.WebsocketClientPolicy(
+        args.host,
+        args.port,
+        connect_timeout=args.connect_timeout,
+        inference_timeout=args.inference_timeout,
+    ) as client:
+        server_metadata = client.get_server_metadata()
+        input_spec = _load_policy_input_spec(server_metadata)
+    _log(f"Server metadata: {server_metadata}")
+    _log(f"Resolved policy input spec: {input_spec}")
 
     video_dir = None
     if args.record_video != "none":
@@ -448,7 +500,11 @@ def eval_libero(args: Args) -> None:
         task_description = str(task.language)
         initial_states = task_suite.get_task_init_states(task_id)
         task_bddl_file = pathlib.Path(get_libero_path("bddl_files")) / task.problem_folder / task.bddl_file
+        if not task_bddl_file.is_file():
+            raise FileNotFoundError(f"LIBERO task definition is missing: {task_bddl_file}")
         trial_count = min(args.num_trials_per_task, len(initial_states))
+        if trial_count == 0:
+            raise RuntimeError(f"LIBERO task {task_id} does not provide any initial states.")
         if trial_count < args.num_trials_per_task:
             _log(
                 f"[WARN] Task {task_id} only provides {len(initial_states)} initial states; "
@@ -459,8 +515,12 @@ def eval_libero(args: Args) -> None:
         for episode_idx in range(trial_count):
             video_path = ""
             if video_dir is not None:
-                safe_task_desc = task_description.replace(" ", "_")
-                video_path = str(video_dir / f"rollout_{safe_task_desc}_{episode_idx}_pending.mp4")
+                safe_task_desc = re.sub(r"[^A-Za-z0-9_.-]+", "_", task_description).strip("_")[:120] or "task"
+                video_path = str(
+                    video_dir / f"task{task_id}_seed{args.seed}_{safe_task_desc}_{episode_idx}_pending.mp4"
+                )
+
+            _log(f"Rollout: suite={args.task_suite_name} task={task_id} trial={episode_idx} seed={args.seed}")
 
             is_success = _run_episode_in_subprocess(
                 task_suite_name=args.task_suite_name,
@@ -472,6 +532,7 @@ def eval_libero(args: Args) -> None:
                 args=args,
                 video_path=video_path,
             )
+            _log(f"Rollout result: task={task_id} trial={episode_idx} seed={args.seed} success={is_success}")
 
             if is_success:
                 task_successes += 1

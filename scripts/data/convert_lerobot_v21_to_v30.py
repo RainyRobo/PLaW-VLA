@@ -25,10 +25,6 @@ def _ensure_import_paths() -> None:
 
 _ensure_import_paths()
 
-from lerobot.datasets.compute_stats import compute_episode_stats
-import numpy as np
-import pyarrow.parquet as pq
-
 from openpi.datasets.common import progress as progress_display
 from openpi.datasets.common import ray_runtime
 from openpi.datasets.specs import lerobot_v21
@@ -63,23 +59,6 @@ def _parse_vector_element_remaps(values: list[str]) -> tuple[lerobot_v21.VectorE
             )
         )
     return tuple(remaps)
-
-
-def _with_vector_remaps(
-    bundle: lerobot_v21.V21DatasetBundle,
-    remaps: tuple[lerobot_v21.VectorElementRemap, ...],
-) -> lerobot_v21.V21DatasetBundle:
-    columns = sorted({remap.column_name for remap in remaps})
-    feature_specs = {name: bundle.info["features"][name] for name in columns}
-    episodes = []
-    for episode in bundle.episodes:
-        table = pq.read_table(episode.source_data_path, columns=columns)
-        table = lerobot_v21.apply_vector_element_remaps_to_table(table, remaps)
-        episode_data = {name: np.asarray(table.column(name).to_pylist()) for name in columns}
-        stats = dict(episode.stats)
-        stats.update(compute_episode_stats(episode_data, feature_specs))
-        episodes.append(dataclasses.replace(episode, stats=stats))
-    return dataclasses.replace(bundle, episodes=tuple(episodes), vector_element_remaps=remaps)
 
 
 def main() -> None:
@@ -132,7 +111,7 @@ def main() -> None:
     ray_runtime.configure_process_temp_dir(temp_dir)
     bundle = lerobot_v21.load_v21_dataset_bundle(input_root)
     if vector_element_remaps:
-        bundle = _with_vector_remaps(bundle, vector_element_remaps)
+        bundle = dataclasses.replace(bundle, vector_element_remaps=vector_element_remaps)
     finalize_total = lerobot_v21.estimate_convert_finalize_steps(bundle)
     with progress_display.create_progress(console=CONSOLE) as progress:
         finalize_task_id = progress.add_task(

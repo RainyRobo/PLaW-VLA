@@ -53,14 +53,13 @@ def push_dataset_root_to_hub(
     dataset = LeRobotDataset(repo_id=repo_id, root=dataset_root, download_videos=False)
     push_kwargs: dict[str, Any] = {
         "branch": branch,
+        "license": license,
         "tags": list(tags) if tags else None,
         "tag_version": tag_version,
         "push_videos": push_videos,
         "private": private,
         "upload_large_folder": upload_large_folder,
     }
-    if license is not None:
-        push_kwargs["license"] = license
     if card_kwargs:
         push_kwargs.update(card_kwargs)
     dataset.push_to_hub(**push_kwargs)

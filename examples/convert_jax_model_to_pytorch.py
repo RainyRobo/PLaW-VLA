@@ -10,12 +10,13 @@ directly:
         --output-path checkpoints/pi05_base_pytorch
 """
 
+import copy
 import json
 import os
 import pathlib
 import shutil
-import urllib.parse
 from typing import Literal
+import urllib.parse
 
 from flax.nnx import traversals
 import numpy as np
@@ -282,7 +283,7 @@ def slice_paligemma_state_dict(state_dict, config):
     return final_state_dict, expert_dict
 
 
-def slice_gemma_state_dict(state_dict, config, *, num_expert, checkpoint_dir, pi05):
+def slice_gemma_state_dict(state_dict, config, *, num_expert, pi05):
     """Convert Gemma JAX parameters to PyTorch format."""
     # Add missing attributes to config if they don't exist
     if not hasattr(config, "vocab_size"):
@@ -304,7 +305,7 @@ def slice_gemma_state_dict(state_dict, config, *, num_expert, checkpoint_dir, pi
     llm_mlp_linear = state_dict.pop(f"llm/layers/mlp_{num_expert}/linear{suffix}")
 
     # Check if we have Dense layers (for pi05/adaptive normalization) or scale layers (for regular pi0)
-    if "pi05" in checkpoint_dir:
+    if pi05:
         # Pi05 with adaptive normalization
         llm_input_layernorm_bias = state_dict.pop(f"llm/layers/pre_attention_norm_{num_expert}/Dense_0/bias{suffix}")
         llm_post_attention_layernorm_bias = state_dict.pop(f"llm/layers/pre_ffw_norm_{num_expert}/Dense_0/bias{suffix}")
@@ -359,7 +360,7 @@ def slice_gemma_state_dict(state_dict, config, *, num_expert, checkpoint_dir, pi
             i
         ].transpose()
 
-        if "pi05" in checkpoint_dir:
+        if pi05:
             # Pi05 with adaptive normalization - use Dense layer parameters directly
             state_dict[f"paligemma_with_expert.gemma_expert.model.layers.{i}.input_layernorm.dense.bias"] = (
                 llm_input_layernorm_bias[i]
@@ -383,7 +384,7 @@ def slice_gemma_state_dict(state_dict, config, *, num_expert, checkpoint_dir, pi
             )
 
     # Handle final norm layer
-    if "pi05" in checkpoint_dir:
+    if pi05:
         # Pi05 with adaptive normalization - use Dense layer parameters directly
         final_norm_bias = state_dict.pop(f"llm/final_norm_{num_expert}/Dense_0/bias{suffix}")
         final_norm_kernel = state_dict.pop(f"llm/final_norm_{num_expert}/Dense_0/kernel{suffix}")
@@ -440,21 +441,63 @@ def _prepare_model_config_for_conversion(train_config: _config.TrainConfig):
     model_config = train_config.model
     if not isinstance(model_config, openpi.models.pi0_config.Pi0Config):
         raise ValueError(f"Expected Pi0Config, got {type(model_config).__name__}")
+    if model_config.paligemma_variant != "gemma_2b" or model_config.action_expert_variant != "gemma_300m":
+        raise ValueError("Base conversion requires gemma_2b PaliGemma and a gemma_300m action expert.")
 
     overrides = {}
     if model_config.enable_world_model:
         print("[convert] Disabling enable_world_model for conversion (world model is PyTorch-only)")
         overrides["enable_world_model"] = False
+        overrides["vjepa2_enable_input_projector"] = False
 
-    if overrides:
-        model_config = _dc.replace(model_config, **overrides)
+    model_config = _dc.replace(model_config, **overrides)
 
-    if not hasattr(model_config, "training_stage"):
-        object.__setattr__(model_config, "training_stage", train_config.training_stage)
-    if not hasattr(model_config, "device"):
-        object.__setattr__(model_config, "device", "cpu")
+    # The foundation model has no world-model branch. Construct it in the
+    # action stage; wm_alignment requires world-model modules to be present.
+    object.__setattr__(model_config, "training_stage", "post_training")
+    object.__setattr__(model_config, "device", "cpu")
 
     return model_config
+
+
+def _load_converted_state_dict(model: torch.nn.Module, state_dict: dict[str, torch.Tensor]) -> None:
+    """Require complete foundation coverage, allowing tied names and the unused action LM head."""
+    targets = model.state_dict()
+    unexpected = sorted(state_dict.keys() - targets.keys())
+    if unexpected:
+        raise ValueError(f"Unexpected converted tensors: {unexpected[:10]}")
+
+    for key, value in state_dict.items():
+        if value.shape != targets[key].shape:
+            raise ValueError(
+                f"Converted tensor {key!r} has shape {tuple(value.shape)}; "
+                f"expected {tuple(targets[key].shape)}."
+            )
+
+    def tensor_view(value: torch.Tensor) -> tuple:
+        return (value.data_ptr(), value.storage_offset(), tuple(value.shape), tuple(value.stride()))
+
+    loaded_views = {tensor_view(targets[key]) for key in state_dict}
+    # Actions use gemma_expert.model directly. Its vocabulary projection is
+    # created by GemmaForCausalLM but has no counterpart in the JAX action expert.
+    missing = sorted(
+        key
+        for key, target in targets.items()
+        if key not in state_dict
+        and tensor_view(target) not in loaded_views
+        and key != "paligemma_with_expert.gemma_expert.lm_head.weight"
+    )
+    if missing:
+        raise ValueError(f"Missing converted foundation tensors: {missing[:10]}")
+    model.load_state_dict(state_dict, strict=False)
+
+
+def _conversion_model_dtype(precision: str) -> str:
+    if precision not in {"float32", "bfloat16", "float16"}:
+        raise ValueError(f"Invalid precision: {precision}")
+    # Gemma initializes in fp32 or bf16. Load fp16 output in fp32 first so
+    # loading never loses precision through an intermediate bf16 conversion.
+    return "bfloat16" if precision == "bfloat16" else "float32"
 
 
 def convert_pi0_checkpoint(
@@ -474,6 +517,8 @@ def convert_pi0_checkpoint(
         model_config: Model config (already prepared for conversion)
         original_train_config: Original TrainConfig used to recover metadata
     """
+    model_config = copy.copy(model_config)
+    object.__setattr__(model_config, "dtype", _conversion_model_dtype(precision))
     checkpoint_dir = str(pathlib.Path(checkpoint_dir).resolve())
     print(f"Converting PI0 checkpoint from {checkpoint_dir} to {output_path}")
     print(f"Model config: {model_config}")
@@ -544,29 +589,32 @@ def convert_pi0_checkpoint(
             )()
 
     paligemma_config = PaliGemmaConfig()
-    action_expert_config = openpi.models.gemma.get_config("gemma_300m")
+    action_expert_config = openpi.models.gemma.get_config(model_config.action_expert_variant)
 
     # Process PaliGemma weights
     paligemma_params, expert_params = slice_paligemma_state_dict(initial_params["paligemma_params"], paligemma_config)
 
     # Process Gemma weights from expert_params
     gemma_params = slice_gemma_state_dict(
-        expert_params, action_expert_config, num_expert=1, checkpoint_dir=checkpoint_dir, pi05=model_config.pi05
+        expert_params, action_expert_config, num_expert=1, pi05=model_config.pi05
     )
 
     # Instantiate model (world model disabled, so this does not require V-JEPA2 / CUDA)
     pi0_model = openpi.models_pytorch.pi0_pytorch.PI0Pytorch(model_config)
+    pi0_model.paligemma_with_expert.paligemma.tie_weights()
 
     # Combine all parameters (no prefix needed for our model structure)
     all_params = {**paligemma_params, **gemma_params, **projection_params}
 
     # Load state dict
-    pi0_model.load_state_dict(all_params, strict=False)
+    _load_converted_state_dict(pi0_model, all_params)
 
     if precision == "float32":
         pi0_model = pi0_model.to(torch.float32)
     elif precision == "bfloat16":
         pi0_model = pi0_model.to(torch.bfloat16)
+    elif precision == "float16":
+        pi0_model = pi0_model.to(torch.float16)
     else:
         raise ValueError(f"Invalid precision: {precision}")
 
@@ -605,7 +653,7 @@ def convert_pi0_checkpoint(
         print(
             "[NOTE] World model components (V-JEPA2 adapter, world model expert, predictor head) are not in the "
             "converted checkpoint. They will be initialized fresh when training loads this checkpoint via "
-            "pytorch_weight_path with strict=False."
+            "pytorch_weight_path."
         )
 
 
@@ -625,6 +673,7 @@ def main(
         precision: Precision for model conversion
         inspect_only: Only inspect parameter keys, don't convert
     """
+    _conversion_model_dtype(precision)
     train_config = _config.get_config(config_name)
     model_config = _prepare_model_config_for_conversion(train_config)
     resolved_checkpoint_dir = resolve_local_checkpoint_dir(checkpoint_dir)

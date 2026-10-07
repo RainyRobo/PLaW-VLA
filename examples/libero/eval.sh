@@ -69,6 +69,10 @@ ensure_prereqs() {
         echo "[ERROR] uv is not installed or not on PATH."
         exit 1
     fi
+    if ! command -v setsid >/dev/null 2>&1; then
+        echo "[ERROR] setsid is required to manage server and simulator process groups."
+        exit 1
+    fi
 }
 
 
@@ -86,19 +90,19 @@ extract_results_block() {
 
 extract_success_rate() {
     local log_file="$1"
-    local block
+    local block rate
     block="$(extract_results_block "${log_file}")"
-    if [[ -n "${block}" ]]; then
-        echo "${block}" | grep '^suite_total=' | head -1 | cut -d'|' -f2
-    else
-        awk '/Final Total Success Rate:/ {rate=$5} END {if (rate != "") print rate; else print "N/A"}' "${log_file}"
+    rate="$(printf '%s\n' "${block}" | awk -F'|' '/^suite_total=/ {print $2; exit}')"
+    if ! [[ "${rate}" =~ ^[0-9]+(\.[0-9]+)?$ ]] || ! awk -v rate="${rate}" 'BEGIN {exit !(rate >= 0 && rate <= 1)}'; then
+        return 1
     fi
+    printf '%s\n' "${rate}"
 }
 
 
 extract_task_lines() {
     local log_file="$1"
-    extract_results_block "${log_file}" | grep '^task=' | sed 's/^task=//'
+    extract_results_block "${log_file}" | sed -n 's/^task=//p'
 }
 
 
@@ -123,6 +127,46 @@ resolve_suites() {
     fi
     if [[ ${#SUITES[@]} -eq 0 ]]; then
         echo "[ERROR] No task suites were resolved."
+        exit 1
+    fi
+    local -A seen=()
+    local suite
+    for suite in "${SUITES[@]}"; do
+        case "${suite}" in
+            libero_spatial|libero_object|libero_goal|libero_10|libero_90) ;;
+            *)
+                echo "[ERROR] Unknown LIBERO task suite: ${suite}"
+                exit 1
+                ;;
+        esac
+        if [[ -n "${seen[${suite}]:-}" ]]; then
+            echo "[ERROR] TASK_SUITES contains duplicate suite ${suite}."
+            exit 1
+        fi
+        seen["${suite}"]=1
+    done
+}
+
+
+validate_eval_options() {
+    if ! python3 - "${PORT}" "${TRIALS}" "${SEED}" "${RECORD}" <<'PY'
+import sys
+
+for name, raw, lower, upper in (
+    ("PORT", sys.argv[1], 1, 65535),
+    ("TRIALS", sys.argv[2], 1, None),
+    ("SEED", sys.argv[3], 0, 2**32 - 1),
+):
+    try:
+        value = int(raw)
+    except ValueError:
+        raise SystemExit(f"[ERROR] {name} must be an integer, got {raw!r}.")
+    if value < lower or (upper is not None and value > upper):
+        raise SystemExit(f"[ERROR] {name} is out of range: {value}.")
+if sys.argv[4] not in {"none", "failure", "all"}:
+    raise SystemExit(f"[ERROR] RECORD must be none, failure, or all, got {sys.argv[4]!r}.")
+PY
+    then
         exit 1
     fi
 }
@@ -180,6 +224,14 @@ validate_checkpoint_dir() {
     fi
     if [[ ! -d "${checkpoint_dir}" ]]; then
         echo "[ERROR] Checkpoint directory not found: ${checkpoint_dir}"
+        exit 1
+    fi
+    if [[ ! -f "${checkpoint_dir}/model.safetensors" && ! -d "${checkpoint_dir}/params" ]]; then
+        echo "[ERROR] Checkpoint has neither model.safetensors nor params: ${checkpoint_dir}"
+        exit 1
+    fi
+    if [[ ! -d "${checkpoint_dir}/assets" ]]; then
+        echo "[ERROR] Checkpoint normalization assets are missing: ${checkpoint_dir}/assets"
         exit 1
     fi
 }
@@ -349,7 +401,6 @@ choose_wizard_profile_interactively() {
 
 
 load_gpu_options() {
-    local defaults_str="${1:-}"
     local line idx label
     declare -A seen=()
 
@@ -373,22 +424,39 @@ load_gpu_options() {
         done < <(nvidia-smi --query-gpu=index,name --format=csv,noheader 2>/dev/null || true)
     fi
 
-    for idx in ${defaults_str}; do
-        idx="${idx//[[:space:]]/}"
-        [[ -z "${idx}" ]] && continue
-        if [[ -z "${seen[${idx}]:-}" ]]; then
-            GPU_VALUES+=("${idx}")
-            GPU_LABELS+=("GPU ${idx}")
-            seen["${idx}"]=1
-        fi
-    done
+}
 
-    if [[ ${#GPU_VALUES[@]} -eq 0 ]]; then
-        for idx in 0 1 2 3; do
-            GPU_VALUES+=("${idx}")
-            GPU_LABELS+=("GPU ${idx}")
-        done
+
+ensure_gpu_available() {
+    local label="$1"
+    local gpu="$2"
+    load_gpu_options
+    if ! gpu_list_contains "${gpu}" "${GPU_VALUES[@]}"; then
+        echo "[ERROR] ${label}=${gpu} is not available. Detected GPU indices: ${GPU_VALUES[*]:-(none)}"
+        echo "Select a detected GPU index, or use the direct LIBERO client for other rendering setups."
+        exit 1
     fi
+}
+
+
+validate_gpu_list() {
+    local gpu_list_str="$1"
+    local -a gpu_array=()
+    local -A seen=()
+    local gpu
+    read -r -a gpu_array <<< "${gpu_list_str}"
+    if [[ ${#gpu_array[@]} -eq 0 ]]; then
+        echo "[ERROR] GPU_LIST must contain at least one GPU index."
+        exit 1
+    fi
+    for gpu in "${gpu_array[@]}"; do
+        ensure_gpu_available "GPU_LIST" "${gpu}"
+        if [[ -n "${seen[${gpu}]:-}" ]]; then
+            echo "[ERROR] GPU_LIST contains duplicate GPU index ${gpu}."
+            exit 1
+        fi
+        seen["${gpu}"]=1
+    done
 }
 
 
@@ -410,7 +478,7 @@ recommended_eval_gpu_list() {
     fi
 
     read -r -a excluded <<< "${excluded_values}"
-    load_gpu_options ""
+    load_gpu_options
 
     for gpu in "${GPU_VALUES[@]}"; do
         if gpu_list_contains "${gpu}" "${excluded[@]}"; then
@@ -438,7 +506,7 @@ choose_single_gpu_interactively() {
         prompt_body+=$'\n\n'"${note_text}"
     fi
 
-    load_gpu_options "${default_value} ${excluded_values}"
+    load_gpu_options
 
     if ui_can_use_whiptail; then
         local -a default_selections=()
@@ -522,7 +590,7 @@ choose_gpu_list_interactively() {
         prompt_body+=$'\n\n'"${note_text}"
     fi
 
-    load_gpu_options "${default_value} ${excluded_values}"
+    load_gpu_options
 
     if ui_can_use_whiptail; then
         local -a default_selections=()
@@ -617,6 +685,8 @@ ensure_distinct_gpu_pair() {
     local lhs_value="$2"
     local rhs_name="$3"
     local rhs_value="$4"
+    ensure_gpu_available "${lhs_name}" "${lhs_value}"
+    ensure_gpu_available "${rhs_name}" "${rhs_value}"
     if [[ "${lhs_value}" == "${rhs_value}" ]]; then
         echo "[ERROR] ${lhs_name} and ${rhs_name} must be different."
         echo "        $(gpu_overlap_note)"
@@ -630,6 +700,8 @@ ensure_gpu_list_excludes() {
     local gpu_list_str="$2"
     local label="${3:-GPU_LIST}"
     local -a gpu_array=()
+    ensure_gpu_available "SERVER_GPU" "${excluded_gpu}"
+    validate_gpu_list "${gpu_list_str}"
     read -r -a gpu_array <<< "${gpu_list_str}"
     if gpu_list_contains "${excluded_gpu}" "${gpu_array[@]}"; then
         echo "[ERROR] ${label} must not include GPU ${excluded_gpu} because it is already reserved for the policy server."
@@ -957,7 +1029,7 @@ edit_interactive_defaults() {
     prompt_with_default PORT "$(append_note_to_prompt "Default policy server port" "${session_note}")" "${PORT:-8001}"
     prompt_with_default TRIALS "$(append_note_to_prompt "Default trials per task" "${session_note}")" "${TRIALS:-50}"
     choose_record_mode_interactively "${RECORD:-failure}" "${session_note}"
-    prompt_with_default SEED "$(append_note_to_prompt "Default random seed" "${session_note}")" "${SEED:-7}"
+    prompt_with_default SEED "$(append_note_to_prompt "Default random seed" "${session_note}")" "${SEED:-42}"
     choose_single_gpu_interactively SERVER_GPU "Choose the default policy GPU" "${SERVER_GPU:-0}" "" "${session_note}"
     choose_single_gpu_interactively CLIENT_GPU "Choose the default evaluation GPU" "${CLIENT_GPU:-1}" "${SERVER_GPU}" "$(append_note_to_prompt "${gpu_overlap_note}" "${session_note}")"
     GPU_LIST="${GPU_LIST:-$(recommended_eval_gpu_list "${#SUITES[@]}" "${SERVER_GPU}" "")}"
@@ -1093,7 +1165,7 @@ run_custom_interactive_mode() {
         fi
         prompt_with_default TRIALS "$(append_note_to_prompt "Trials per task" "${trials_note}")" "${TRIALS:-10}"
         choose_record_mode_interactively "${RECORD:-failure}" "${record_note}"
-        prompt_with_default SEED "$(append_note_to_prompt "Random seed" "${seed_note}")" "${SEED:-7}"
+        prompt_with_default SEED "$(append_note_to_prompt "Random seed" "${seed_note}")" "${SEED:-42}"
         recommended_gpu_list="$(recommended_eval_gpu_list "${#SUITES[@]}" "${SERVER_GPU:-}" "${GPU_LIST:-}")"
         choose_gpu_list_interactively GPU_LIST "Choose one or more evaluation GPUs" "${recommended_gpu_list}" "${SERVER_GPU:-}" "$(append_note_to_prompt "${gpu_overlap_note}" "${eval_gpu_list_note}")"
         prompt_with_default RUN_NAME "$(append_note_to_prompt "Run name" "${run_name_note}")" "${RUN_NAME:-libero_eval}"
@@ -1116,7 +1188,7 @@ run_custom_interactive_mode() {
     choose_single_gpu_interactively SERVER_GPU "Choose the policy GPU" "${SERVER_GPU:-0}" "" "${policy_gpu_note}"
     prompt_with_default TRIALS "$(append_note_to_prompt "Trials per task" "${trials_note}")" "${TRIALS:-50}"
     choose_record_mode_interactively "${RECORD:-failure}" "${record_note}"
-    prompt_with_default SEED "$(append_note_to_prompt "Random seed" "${seed_note}")" "${SEED:-7}"
+    prompt_with_default SEED "$(append_note_to_prompt "Random seed" "${seed_note}")" "${SEED:-42}"
     if [[ "${BENCHMARK_MODE}" == "parallel" ]]; then
         recommended_gpu_list="$(recommended_eval_gpu_list "${#SUITES[@]}" "${SERVER_GPU}" "${GPU_LIST:-}")"
         choose_gpu_list_interactively GPU_LIST "Choose one or more evaluation GPUs" "${recommended_gpu_list}" "${SERVER_GPU}" "$(append_note_to_prompt "${gpu_overlap_note}" "${eval_gpu_list_note}")"
@@ -1198,10 +1270,10 @@ run_client_eval() {
 
     mkdir -p "${video_dir}"
     CUDA_VISIBLE_DEVICES="${gpu}" \
-    EGL_DEVICE_ID="${gpu}" \
+    MUJOCO_EGL_DEVICE_ID="${gpu}" \
     MUJOCO_GL="${MUJOCO_GL:-egl}" \
     PYTHONWARNINGS="ignore" \
-    "${cmd[@]}" > "${log_file}"
+    "${cmd[@]}" > "${log_file}" 2>&1
 }
 
 
@@ -1220,7 +1292,7 @@ start_local_server() {
     echo "  Policy GPU: ${SERVER_GPU}"
 
     CUDA_VISIBLE_DEVICES="${SERVER_GPU}" \
-    uv run "${PROJECT_ROOT}/scripts/serve_policy.py" \
+    setsid uv run --project "${PROJECT_ROOT}" --frozen python "${PROJECT_ROOT}/scripts/serve_policy.py" \
         --env LIBERO \
         --port "${PORT}" \
         policy:checkpoint \
@@ -1333,7 +1405,7 @@ evaluate_suites_sequential() {
 
     local overall_ok=true
     local total_start=$SECONDS
-    local suite log_file video_dir suite_start
+    local suite log_file video_dir suite_start rate
 
     for suite in "${SUITES[@]}"; do
         log_file="${RESULTS_DIR}/${suite}.log"
@@ -1341,8 +1413,9 @@ evaluate_suites_sequential() {
         suite_start=$SECONDS
         echo -e "${BOLD}Running ${suite}${RESET}  ${DIM}(log: ${log_file})${RESET}"
 
-        if run_client_eval "${suite}" "${HOST}" "${PORT}" "${TRIALS}" "${RECORD}" "${SEED}" "${video_dir}" "${log_file}" "${client_gpu}" "$@"; then
-            SUITE_RESULTS["${suite}"]="$(extract_success_rate "${log_file}")"
+        if run_client_eval "${suite}" "${HOST}" "${PORT}" "${TRIALS}" "${RECORD}" "${SEED}" "${video_dir}" "${log_file}" "${client_gpu}" "$@" \
+            && rate="$(extract_success_rate "${log_file}")"; then
+            SUITE_RESULTS["${suite}"]="${rate}"
             echo -e "  ${GREEN}OK${RESET} ${suite}  success rate: ${GREEN}${SUITE_RESULTS[${suite}]}${RESET}  ($(elapsed_str "$((SECONDS - suite_start))"))"
         else
             SUITE_RESULTS["${suite}"]="FAILED"
@@ -1377,24 +1450,23 @@ evaluate_suites_parallel() {
     declare -a AVAILABLE_GPUS=("${GPU_ARRAY[@]}")
 
     cleanup_parallel_workers() {
-        local exit_code=$?
+        local exit_code="$1"
         local pid
         for pid in "${ACTIVE_PIDS[@]:-}"; do
-            if kill -0 "${pid}" >/dev/null 2>&1; then
-                kill "${pid}" >/dev/null 2>&1 || true
-            fi
+            stop_process_group "${pid}"
         done
         if [[ ${#ACTIVE_PIDS[@]} -gt 0 ]]; then
             wait "${ACTIVE_PIDS[@]}" >/dev/null 2>&1 || true
         fi
         exit "${exit_code}"
     }
-    trap cleanup_parallel_workers INT TERM
+    trap 'cleanup_parallel_workers 130' INT
+    trap 'cleanup_parallel_workers 143' TERM
 
     local total_start=$SECONDS
     local overall_ok=true
     local queue_index=0
-    local suite gpu log_file video_dir pid idx finished_pid wait_status finished_suite finished_gpu
+    local suite gpu log_file video_dir pid finished_pid wait_status finished_suite finished_gpu rate
 
     SUITE_ORDER=("${SUITES[@]}")
 
@@ -1430,10 +1502,10 @@ evaluate_suites_parallel() {
             fi
 
             CUDA_VISIBLE_DEVICES="${gpu}" \
-            EGL_DEVICE_ID="${gpu}" \
+            MUJOCO_EGL_DEVICE_ID="${gpu}" \
             MUJOCO_GL="${MUJOCO_GL:-egl}" \
             PYTHONWARNINGS="ignore" \
-            "${cmd[@]}" > "${log_file}" 2>&1 &
+            setsid "${cmd[@]}" > "${log_file}" 2>&1 &
             pid=$!
             ACTIVE_PIDS+=("${pid}")
             PID_TO_SUITE["${pid}"]="${suite}"
@@ -1446,7 +1518,17 @@ evaluate_suites_parallel() {
             break
         fi
 
-        if wait -n -p finished_pid "${ACTIVE_PIDS[@]}"; then
+        finished_pid=""
+        while [[ -z "${finished_pid}" ]]; do
+            for pid in "${ACTIVE_PIDS[@]}"; do
+                if ! kill -0 "${pid}" >/dev/null 2>&1; then
+                    finished_pid="${pid}"
+                    break
+                fi
+            done
+            [[ -n "${finished_pid}" ]] || sleep 0.1
+        done
+        if wait "${finished_pid}"; then
             wait_status=0
         else
             wait_status=$?
@@ -1455,8 +1537,8 @@ evaluate_suites_parallel() {
         finished_gpu="${PID_TO_GPU[${finished_pid}]}"
         AVAILABLE_GPUS+=("${finished_gpu}")
 
-        if (( wait_status == 0 )); then
-            SUITE_RESULTS["${finished_suite}"]="$(extract_success_rate "${RESULTS_DIR}/${finished_suite}.log")"
+        if (( wait_status == 0 )) && rate="$(extract_success_rate "${RESULTS_DIR}/${finished_suite}.log")"; then
+            SUITE_RESULTS["${finished_suite}"]="${rate}"
             echo "  [DONE] ${finished_suite} on GPU ${finished_gpu} -> ${SUITE_RESULTS[${finished_suite}]}"
         else
             SUITE_RESULTS["${finished_suite}"]="FAILED"
@@ -1486,7 +1568,9 @@ run_suites_mode() {
     TRIALS="${TRIALS:-50}"
     RECORD="${RECORD:-failure}"
     SEED="${SEED:-42}"
+    validate_eval_options
     CLIENT_GPU="${CLIENT_GPU:-0}"
+    ensure_gpu_available "CLIENT_GPU" "${CLIENT_GPU}"
     START_FROM="${START_FROM:-}"
 
     local timestamp
@@ -1544,9 +1628,9 @@ run_parallel_mode() {
     PORT="${PORT:-8001}"
     TRIALS="${TRIALS:-10}"
     RECORD="${RECORD:-failure}"
-    SEED="${SEED:-7}"
+    SEED="${SEED:-42}"
+    validate_eval_options
     RUN_NAME="${RUN_NAME:-libero_eval}"
-    GPU_LIST="${GPU_LIST:-0 1 2 3}"
 
     if [[ -n "${CHECKPOINT_DIR}" ]]; then
         HOST="127.0.0.1"
@@ -1561,6 +1645,8 @@ run_parallel_mode() {
     SUMMARY_FILE="${RESULTS_DIR}/summary.txt"
 
     resolve_suites "${TASK_SUITES:-}"
+    GPU_LIST="${GPU_LIST:-$(recommended_eval_gpu_list "${#SUITES[@]}" "${SERVER_GPU:-}" "")}"
+    validate_gpu_list "${GPU_LIST}"
     mkdir -p "${RESULTS_DIR}" "${RESULTS_DIR}/videos"
     build_task_id_args
 
@@ -1602,12 +1688,29 @@ run_parallel_mode() {
 
 
 cleanup_server() {
-    if [[ -n "${SERVER_PID:-}" ]] && kill -0 "${SERVER_PID}" 2>/dev/null; then
+    if [[ -n "${SERVER_PID:-}" ]]; then
         echo "[INFO] Stopping policy server (PID=${SERVER_PID})..."
-        kill "${SERVER_PID}" 2>/dev/null || true
+        stop_process_group "${SERVER_PID}"
         wait "${SERVER_PID}" 2>/dev/null || true
         unset SERVER_PID
     fi
+}
+
+
+stop_process_group() {
+    local pid="$1"
+    local attempt
+    if ! [[ "${pid}" =~ ^[0-9]+$ ]]; then
+        return
+    fi
+    kill -TERM -- "-${pid}" 2>/dev/null || true
+    for attempt in {1..20}; do
+        if ! kill -0 -- "-${pid}" 2>/dev/null; then
+            return
+        fi
+        sleep 0.1
+    done
+    kill -KILL -- "-${pid}" 2>/dev/null || true
 }
 
 
@@ -1680,10 +1783,10 @@ run_benchmark_mode() {
     PORT="${PORT:-8001}"
     TRIALS="${TRIALS:-50}"
     RECORD="${RECORD:-failure}"
-    SEED="${SEED:-7}"
+    SEED="${SEED:-42}"
+    validate_eval_options
     SERVER_GPU="${SERVER_GPU:-0}"
     CLIENT_GPU="${CLIENT_GPU:-1}"
-    GPU_LIST="${GPU_LIST:-0 1 2 3}"
 
     case "${BENCHMARK_MODE}" in
         serial|parallel)
@@ -1702,8 +1805,17 @@ run_benchmark_mode() {
 
     SUMMARY_CSV="${root_results_dir}/summary.csv"
     SUMMARY_TXT="${root_results_dir}/summary.txt"
-    resolve_suites "${TASK_SUITES:-${SUITES:-}}"
+    resolve_suites "${TASK_SUITES:-}"
+    GPU_LIST="${GPU_LIST:-$(recommended_eval_gpu_list "${#SUITES[@]}" "${SERVER_GPU}" "")}"
     read -r -a CKPT_STEPS_ARRAY <<< "${CKPT_STEPS_STR}"
+    if [[ ${#CKPT_STEPS_ARRAY[@]} -eq 0 ]]; then
+        echo "[ERROR] CKPT_STEPS must contain at least one checkpoint step."
+        exit 1
+    fi
+    local step
+    for step in "${CKPT_STEPS_ARRAY[@]}"; do
+        validate_checkpoint_dir "${CKPT_BASE}/${step}"
+    done
     build_task_id_args
 
     if [[ "${BENCHMARK_MODE}" == "parallel" ]]; then
@@ -1733,14 +1845,10 @@ run_benchmark_mode() {
     echo "================================================================"
     echo ""
 
-    local step ckpt_dir suite rate val row_sum row_cnt row_avg col_sum col_cnt col_avg grand_sum grand_cnt grand_avg
+    local overall_ok=true
+    local ckpt_dir suite rate val row_sum row_cnt row_avg col_sum col_cnt col_avg grand_sum grand_cnt grand_avg
     for step in "${CKPT_STEPS_ARRAY[@]}"; do
         ckpt_dir="${CKPT_BASE}/${step}"
-        if [ ! -d "${ckpt_dir}" ]; then
-            echo "[WARN] Checkpoint dir not found: ${ckpt_dir}, skipping."
-            continue
-        fi
-
         echo ""
         echo "================================================================"
         echo " Checkpoint: ${step}"
@@ -1769,6 +1877,9 @@ run_benchmark_mode() {
         fi
 
         print_suite_summary "${step_results_dir}/summary.txt" "${EVAL_TOTAL_ELAPSED}" "${step_ok}" false
+        if [[ "${step_ok}" != true ]]; then
+            overall_ok=false
+        fi
 
         for suite in "${SUITE_ORDER[@]}"; do
             rate="${SUITE_RESULTS[${suite}]}"
@@ -1807,12 +1918,12 @@ run_benchmark_mode() {
                 val="${RESULTS[${step},${suite}]:-N/A}"
                 printf "  %-16s" "${val}"
                 if [[ "${val}" =~ ^[0-9.]+$ ]]; then
-                    row_sum="$(echo "${row_sum} + ${val}" | bc)"
+                    row_sum="$(awk -v lhs="${row_sum}" -v rhs="${val}" 'BEGIN {printf "%.4f", lhs + rhs}')"
                     row_cnt=$((row_cnt + 1))
                 fi
             done
             if [ "${row_cnt}" -gt 0 ]; then
-                row_avg="$(echo "scale=4; ${row_sum} / ${row_cnt}" | bc)"
+                row_avg="$(awk -v total="${row_sum}" -v count="${row_cnt}" 'BEGIN {printf "%.4f", total / count}')"
                 printf "  %-10s" "${row_avg}"
             else
                 printf "  %-10s" "N/A"
@@ -1831,21 +1942,21 @@ run_benchmark_mode() {
             for step in "${CKPT_STEPS_ARRAY[@]}"; do
                 val="${RESULTS[${step},${suite}]:-N/A}"
                 if [[ "${val}" =~ ^[0-9.]+$ ]]; then
-                    col_sum="$(echo "${col_sum} + ${val}" | bc)"
+                    col_sum="$(awk -v lhs="${col_sum}" -v rhs="${val}" 'BEGIN {printf "%.4f", lhs + rhs}')"
                     col_cnt=$((col_cnt + 1))
                 fi
             done
             if [ "${col_cnt}" -gt 0 ]; then
-                col_avg="$(echo "scale=4; ${col_sum} / ${col_cnt}" | bc)"
+                col_avg="$(awk -v total="${col_sum}" -v count="${col_cnt}" 'BEGIN {printf "%.4f", total / count}')"
                 printf "  %-16s" "${col_avg}"
-                grand_sum="$(echo "${grand_sum} + ${col_sum}" | bc)"
+                grand_sum="$(awk -v lhs="${grand_sum}" -v rhs="${col_sum}" 'BEGIN {printf "%.4f", lhs + rhs}')"
                 grand_cnt=$((grand_cnt + col_cnt))
             else
                 printf "  %-16s" "N/A"
             fi
         done
         if [ "${grand_cnt}" -gt 0 ]; then
-            grand_avg="$(echo "scale=4; ${grand_sum} / ${grand_cnt}" | bc)"
+            grand_avg="$(awk -v total="${grand_sum}" -v count="${grand_cnt}" 'BEGIN {printf "%.4f", total / count}')"
             printf "  %-10s" "${grand_avg}"
         else
             printf "  %-10s" "N/A"
@@ -1857,6 +1968,7 @@ run_benchmark_mode() {
         echo " Logs: ${root_results_dir}/"
         echo "================================================================"
     } | tee "${SUMMARY_TXT}"
+    [[ "${overall_ok}" == true ]]
 }
 
 
@@ -1867,10 +1979,12 @@ run_serial_mode() {
     TRIALS="${TRIALS:-50}"
     RECORD="${RECORD:-failure}"
     SEED="${SEED:-42}"
+    validate_eval_options
     SERVER_GPU="${SERVER_GPU:-0}"
     CLIENT_GPU="${CLIENT_GPU:-1}"
     HOST="127.0.0.1"
 
+    resolve_suites "${TASK_SUITES:-}"
     ensure_distinct_gpu_pair "SERVER_GPU" "${SERVER_GPU}" "CLIENT_GPU" "${CLIENT_GPU}"
 
     local timestamp

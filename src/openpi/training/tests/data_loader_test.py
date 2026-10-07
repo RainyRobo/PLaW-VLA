@@ -1028,6 +1028,7 @@ def test_libero_transform_dataset_supports_canonical_command_actions_from_singul
         repo_id="fake",
         canonicalize_ee_pose_gripper=True,
         treat_actions_as_commands=True,
+        dataset_state_input_format="two_finger_qpos",
     ).create(tmp_path, model_cfg)
 
     transformed = _data_loader.transform_dataset(_ToyLiberoDataset(), data_cfg, skip_norm_stats=True)
@@ -1050,6 +1051,7 @@ def test_libero_transform_dataset_supports_binary_gripper_targets(tmp_path):
         repo_id="fake",
         canonicalize_ee_pose_gripper=True,
         treat_actions_as_commands=True,
+        dataset_state_input_format="two_finger_qpos",
         dataset_action_gripper_format="binary_target",
     ).create(tmp_path, model_cfg)
 

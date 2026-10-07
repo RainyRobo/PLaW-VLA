@@ -1,5 +1,7 @@
 # Derived from openpi (Copyright 2024 Physical Intelligence, Inc.; Apache-2.0).
 # Modified for PLaW-VLA by the PLaW-VLA authors, 2026.
+import copy
+import dataclasses
 import logging
 import os
 import pathlib
@@ -8,6 +10,7 @@ from typing import Any
 import jax.numpy as jnp
 
 import openpi.models.model as _model
+import openpi.policies.libero_policy as libero_policy
 import openpi.policies.policy as _policy
 import openpi.shared.download as download
 from openpi.training import checkpoints as _checkpoints
@@ -62,6 +65,9 @@ def create_trained_policy(
 
     if is_pytorch:
         logging.info("Using PyTorch device: %s", pytorch_device)
+        # Device settings belong to this policy, not the shared training recipe.
+        train_config = copy.copy(train_config)
+        object.__setattr__(train_config, "model", copy.copy(train_config.model))
         object.__setattr__(train_config.model, "device", pytorch_device)
 
     logging.info("Loading model...")
@@ -71,6 +77,14 @@ def create_trained_policy(
     else:
         model = train_config.model.load(_model.restore_params(checkpoint_dir / "params", dtype=jnp.bfloat16))
     data_config = train_config.data.create(train_config.assets_dirs, train_config.model)
+    # LIBERO clients send rotation vectors and two finger positions; stored
+    # training states use quaternions and one scalar gripper width.
+    data_input_transforms = [
+        dataclasses.replace(transform, state_input_format="two_finger_qpos")
+        if isinstance(transform, libero_policy.LiberoInputs)
+        else transform
+        for transform in data_config.data_transforms.inputs
+    ]
 
     if (
         is_pytorch
@@ -101,7 +115,7 @@ def create_trained_policy(
             *repack_transforms.inputs,
             transforms.InjectDefaultPrompt(default_prompt),
             *data_config.world_model_transforms.inputs,
-            *data_config.data_transforms.inputs,
+            *data_input_transforms,
             transforms.Normalize(norm_stats, use_quantiles=data_config.use_quantile_norm),
             *data_config.model_transforms.inputs,
         ],

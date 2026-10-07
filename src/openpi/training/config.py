@@ -4,6 +4,7 @@
 
 import abc
 from collections.abc import Sequence
+import copy
 import dataclasses
 import difflib
 import json
@@ -734,7 +735,7 @@ def _load_local_dataset_raw_stats(repo_id: str) -> dict[str, Any] | None:
     return raw
 
 
-def _raw_feature_last_dim_range(stats: dict[str, Any], key: str) -> tuple[float, float]:
+def _raw_feature_dim_range(stats: dict[str, Any], key: str, *, index: int = -1) -> tuple[float, float]:
     feature = stats.get(key)
     if not isinstance(feature, dict):
         raise ValueError(f"Raw dataset stats are missing feature {key!r}.")
@@ -742,7 +743,9 @@ def _raw_feature_last_dim_range(stats: dict[str, Any], key: str) -> tuple[float,
     q99 = feature.get("q99")
     if not isinstance(q01, list) or not q01 or not isinstance(q99, list) or not q99:
         raise ValueError(f"Raw dataset stats for {key!r} must contain non-empty q01/q99 arrays.")
-    return float(q01[-1]), float(q99[-1])
+    if not -len(q01) <= index < len(q01) or not -len(q99) <= index < len(q99):
+        raise ValueError(f"Raw dataset stats for {key!r} are missing dimension {index}.")
+    return float(q01[index]), float(q99[index])
 
 
 def _validate_local_libero_gripper_contract(
@@ -750,6 +753,7 @@ def _validate_local_libero_gripper_contract(
     *,
     state_format: libero_policy.LiberoStateGripperFormat,
     action_format: libero_policy.LiberoActionGripperFormat,
+    state_input_format: libero_policy.LiberoStateInputFormat = "canonical",
 ) -> None:
     expanded = _expand_local_repo_ids(repo_id)
     repo_ids = [expanded] if isinstance(expanded, str) else list(expanded or ())
@@ -757,10 +761,19 @@ def _validate_local_libero_gripper_contract(
         stats = _load_local_dataset_raw_stats(str(single_repo_id))
         if stats is None:
             continue
-        state_q01, state_q99 = _raw_feature_last_dim_range(stats, "observation.state")
-        action_q01, action_q99 = _raw_feature_last_dim_range(stats, "action")
+        state_q01, state_q99 = _raw_feature_dim_range(stats, "observation.state")
+        action_q01, action_q99 = _raw_feature_dim_range(stats, "action")
 
-        if state_format == "physical_width":
+        if state_input_format == "two_finger_qpos":
+            if state_format != "physical_width":
+                raise ValueError("two_finger_qpos requires physical finger positions in metres.")
+            other_q01, other_q99 = _raw_feature_dim_range(stats, "observation.state", index=-2)
+            state_q01 = min(state_q01, other_q01)
+            state_q99 = max(state_q99, other_q99)
+            state_ok = -0.10 <= state_q01 <= state_q99 <= 0.10
+        elif state_input_format != "canonical":
+            raise ValueError(f"Unsupported LIBERO state input format {state_input_format!r}.")
+        elif state_format == "physical_width":
             state_ok = -0.01 <= state_q01 and state_q99 <= 0.10
         elif state_format == "open_fraction":
             state_ok = -0.05 <= state_q01 and 0.50 <= state_q99 <= 1.05
@@ -780,7 +793,7 @@ def _validate_local_libero_gripper_contract(
             raise ValueError(
                 "LIBERO gripper contract mismatch for "
                 f"{pathlib.Path(str(single_repo_id)).resolve()}: config declares "
-                f"state={state_format}, action={action_format}, but raw q01/q99 are "
+                f"input={state_input_format}, state={state_format}, action={action_format}, but raw q01/q99 are "
                 f"state=({state_q01:.6g}, {state_q99:.6g}), "
                 f"action=({action_q01:.6g}, {action_q99:.6g}). "
                 "Fix the dataset declaration or conversion before computing norm stats/training."
@@ -829,6 +842,7 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
     # canonicalization. Every chunk step uses that same state, matching the
     # π₀.₅ DeltaActions convention. Not compatible with pretrain_world_model.
     use_canonical_ee_delta: bool = False
+    dataset_state_input_format: libero_policy.LiberoStateInputFormat = "canonical"
     dataset_state_gripper_format: libero_policy.LiberoStateGripperFormat = "physical_width"
     dataset_action_gripper_format: libero_policy.LiberoActionGripperFormat = "signed_command"
     base_image_key: str = "observation.images.image"
@@ -841,6 +855,7 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
                 self.repo_id,
                 state_format=self.dataset_state_gripper_format,
                 action_format=self.dataset_action_gripper_format,
+                state_input_format=self.dataset_state_input_format,
             )
         repack_mapping: dict[str, str] = {
             "observation/image": self.base_image_key,
@@ -875,6 +890,7 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
                 enable_world_model=wm_enabled,
                 image_keys=repacked_image_keys,
                 canonicalize_ee_pose_gripper=self.canonicalize_ee_pose_gripper,
+                state_input_format=self.dataset_state_input_format,
                 treat_actions_as_commands=self.treat_actions_as_commands,
                 dataset_state_gripper_format=self.dataset_state_gripper_format,
                 dataset_action_gripper_format=self.dataset_action_gripper_format,
@@ -2298,7 +2314,23 @@ class TrainConfig:
     def __post_init__(self) -> None:
         if self.resume and self.overwrite:
             raise ValueError("Cannot resume and overwrite at the same time.")
-        object.__setattr__(self.model, "training_stage", self.training_stage)
+        for name in ("batch_size", "num_train_steps", "log_interval", "save_interval", "fsdp_devices"):
+            value = getattr(self, name)
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer, got {value!r}.")
+        if not isinstance(self.num_workers, int) or isinstance(self.num_workers, bool) or self.num_workers < 0:
+            raise ValueError(f"num_workers must be a non-negative integer, got {self.num_workers!r}.")
+        if self.keep_period is not None and (
+            not isinstance(self.keep_period, int) or isinstance(self.keep_period, bool) or self.keep_period <= 0
+        ):
+            raise ValueError(f"keep_period must be a positive integer or None, got {self.keep_period!r}.")
+        if not isinstance(self.seed, int) or isinstance(self.seed, bool) or not 0 <= self.seed < 2**32:
+            raise ValueError(f"seed must be an integer in [0, 2**32), got {self.seed!r}.")
+        if self.training_stage not in ("wm_alignment", "post_training"):
+            raise ValueError(f"Unsupported training_stage {self.training_stage!r}.")
+        model = copy.copy(self.model)
+        object.__setattr__(model, "training_stage", self.training_stage)
+        object.__setattr__(self, "model", model)
 
 
 # Use `get_config` if you need to get a config by name in your code.

@@ -53,9 +53,9 @@ MUJOCO_GL=egl bash examples/libero_plus/eval.sh \
   --task-suite-name libero_spatial --task-ids 0 1 2 --num-trials-per-task 1 --seed 42
 ```
 
-Set `--host`, `--port`, and `--result-root` as needed. The client reads image keys, action conventions, and history offsets from the server metadata.
+Set `--host`, `--port`, and `--result-root` as needed. `--connect-timeout` and `--inference-timeout` adjust connection and response waits in seconds. The client reads image keys, action conventions, and history offsets from the server metadata.
 
-The client saves episode records to `checkpoint.json` under the result root and resumes from that file. Use a separate result root for a different checkpoint or evaluation setup. Summarize recorded perturbation categories with:
+The client saves episode records to `checkpoint.json` under the result root and resumes from that file. Resuming requires the same seed. Use a separate result root for a different seed, checkpoint, or evaluation setup. Summarize recorded perturbation categories with:
 
 ```bash
 python3 examples/libero_plus/aggregate.py /path/to/results --counts --save

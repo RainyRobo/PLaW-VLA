@@ -30,6 +30,7 @@ from typing import Any
 
 from datasets import Dataset
 import jsonlines
+from lerobot.datasets.compute_stats import DEFAULT_QUANTILES
 from lerobot.datasets.compute_stats import aggregate_stats
 from lerobot.datasets.io_utils import cast_stats_to_numpy
 from lerobot.datasets.io_utils import get_file_size_in_mb
@@ -175,6 +176,7 @@ def _build_v3_info(
     updated["total_tasks"] = total_tasks
     updated["data_files_size_in_mb"] = data_budget_mb
     updated["video_files_size_in_mb"] = video_budget_mb
+    updated["features"] = {name: dict(feature) for name, feature in info.get("features", {}).items()}
     updated.pop("total_chunks", None)
     updated.pop("total_videos", None)
     for feature in updated.get("features", {}).values():
@@ -305,7 +307,7 @@ def apply_vector_element_remaps_to_table(
     for remap in remaps:
         column_index = table.schema.get_field_index(remap.column_name)
         if column_index < 0:
-            continue
+            raise ValueError(f"Vector element remap column is missing: {remap.column_name!r}.")
 
         values = _column_to_numpy(table.column(remap.column_name))
         if values.dtype == object:
@@ -554,13 +556,14 @@ def _write_sharded_data_files(
     source_column_renames: dict[Path, dict[str, str]],
     source_vector_element_remaps: dict[Path, tuple[VectorElementRemap, ...]],
     on_episode_processed: Callable[[], None] | None = None,
-) -> tuple[list[dict[str, Any]], int]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
     chunk_idx = 0
     file_idx = 0
     size_in_mb = 0.0
     frame_offset = 0
     pending_tables: list[pa.Table] = []
     per_episode_metadata: list[dict[str, Any]] = []
+    per_episode_stats: list[dict[str, Any]] = []
 
     def flush_pending() -> None:
         if not pending_tables:
@@ -586,24 +589,46 @@ def _write_sharded_data_files(
                 "dataset_to_index": frame_offset + episode.source.num_frames,
             }
         )
-        pending_tables.append(
-            _rewrite_episode_table(
-                episode.source.source_data_path,
-                output_episode_index=episode.output_episode_index,
-                dataset_from_index=frame_offset,
-                task_index_remap=episode.task_index_remap,
-                feature_specs=source_feature_maps.get(episode.source.source_root),
-                column_renames=source_column_renames.get(episode.source.source_root),
-                vector_element_remaps=source_vector_element_remaps.get(episode.source.source_root),
-            )
+        column_renames = source_column_renames.get(episode.source.source_root, {})
+        vector_element_remaps = source_vector_element_remaps.get(episode.source.source_root, ())
+        table = _rewrite_episode_table(
+            episode.source.source_data_path,
+            output_episode_index=episode.output_episode_index,
+            dataset_from_index=frame_offset,
+            task_index_remap=episode.task_index_remap,
+            feature_specs=source_feature_maps.get(episode.source.source_root),
+            column_renames=column_renames,
+            vector_element_remaps=vector_element_remaps,
         )
+        modified_columns = {"index", "episode_index", "task_index"} | {
+            column_renames.get(remap.column_name, remap.column_name) for remap in vector_element_remaps
+        }
+        stats = dict(episode.source.stats)
+        for name in sorted(modified_columns.intersection(table.schema.names)):
+            values = _column_to_numpy(table.column(name))
+            if values.dtype == object:
+                values = np.asarray(values.tolist())
+            keepdims = values.ndim == 1
+            stats[name] = {
+                "min": np.min(values, axis=0, keepdims=keepdims),
+                "max": np.max(values, axis=0, keepdims=keepdims),
+                "mean": np.mean(values, axis=0, dtype=np.float64, keepdims=keepdims),
+                "std": np.std(values, axis=0, dtype=np.float64, keepdims=keepdims),
+                "count": np.array([len(values)]),
+                **{
+                    f"q{int(q * 100):02d}": np.quantile(values, q, axis=0, keepdims=keepdims)
+                    for q in DEFAULT_QUANTILES
+                },
+            }
+        per_episode_stats.append(stats)
+        pending_tables.append(table)
         size_in_mb += episode.source.data_size_mb
         frame_offset += episode.source.num_frames
         if on_episode_processed is not None:
             on_episode_processed()
 
     flush_pending()
-    return per_episode_metadata, frame_offset
+    return per_episode_metadata, per_episode_stats, frame_offset
 
 
 def _write_output_video_shard(output_path: Path, input_paths: list[Path]) -> None:
@@ -718,11 +743,11 @@ def _build_episode_rows(
     episodes: list[OutputEpisode],
     *,
     data_metadata: list[dict[str, Any]],
+    episode_stats: list[dict[str, Any]],
     video_metadata: dict[int, dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     data_by_episode = {int(item["episode_index"]): item for item in data_metadata}
     episode_rows: list[dict[str, Any]] = []
-    episode_stats: list[dict[str, Any]] = []
     for episode in episodes:
         episode_rows.append(
             {
@@ -731,7 +756,6 @@ def _build_episode_rows(
                 **episode.episode_metadata,
             }
         )
-        episode_stats.append(episode.source.stats)
     return episode_rows, episode_stats
 
 
@@ -815,7 +839,7 @@ def _convert_output_episodes(
         nonlocal finalize_completed
         finalize_completed = _advance_progress(finalize_progress, completed=finalize_completed, total=finalize_total)
 
-    data_metadata, total_frames = _write_sharded_data_files(
+    data_metadata, episode_stats, total_frames = _write_sharded_data_files(
         episodes,
         out_root,
         data_file_size_in_mb=data_budget_mb,
@@ -847,6 +871,7 @@ def _convert_output_episodes(
     episode_rows, episode_stats = _build_episode_rows(
         episodes,
         data_metadata=data_metadata,
+        episode_stats=episode_stats,
         video_metadata=video_metadata,
     )
     _write_episode_rows(out_root, episode_rows=episode_rows, episode_stats=episode_stats)
@@ -867,6 +892,9 @@ def convert_dataset(
     del link_mode
     bundle = bundle or load_v21_dataset_bundle(input_root)
     output_root = output_root.expanduser().resolve()
+    source_root = bundle.root.expanduser().resolve()
+    if output_root == source_root or output_root in source_root.parents:
+        raise ValueError("Output directory must not be the input directory or an ancestor of it.")
 
     if output_root.exists():
         if not overwrite:
@@ -925,6 +953,10 @@ def merge_datasets(
     _validate_mergeable_bundles(bundles)
 
     output_root = output_root.expanduser().resolve()
+    for bundle in bundles:
+        source_root = bundle.root.expanduser().resolve()
+        if output_root == source_root or output_root in source_root.parents:
+            raise ValueError("Output directory must not be an input directory or an ancestor of it.")
     if output_root.exists():
         if not overwrite:
             raise FileExistsError(f"Output already exists: {output_root}")
@@ -939,7 +971,7 @@ def merge_datasets(
     video_budget_mb = max(bundle.max_video_file_mb for bundle in bundles)
     _, _, total_frames = _convert_output_episodes(
         episodes,
-        info=bundles[0].info,
+        info={**bundles[0].info, "splits": {"train": f"0:{len(episodes)}"}},
         tasks=merged_tasks,
         video_keys=bundles[0].video_keys,
         data_budget_mb=data_budget_mb,

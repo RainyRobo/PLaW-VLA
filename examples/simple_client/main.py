@@ -3,6 +3,7 @@
 from collections.abc import Mapping
 import dataclasses
 import logging
+import math
 import pathlib
 import time
 
@@ -26,6 +27,8 @@ class Args:
     port: int = 8001
     # API key to use for the server.
     api_key: str | None = None
+    connect_timeout: float = 30.0
+    inference_timeout: float = 60.0
     # Number of steps to run the policy for.
     num_steps: int = 20
     # Path to save the timings to a parquet file. (e.g., timing.parquet)
@@ -36,17 +39,18 @@ class TimingRecorder:
     """Records timing measurements for different keys."""
 
     def __init__(self) -> None:
-        self._timings: dict[str, list[float]] = {}
+        self._timings: dict[str, list[float | None]] = {}
+        self._num_steps = 0
 
-    def record(self, key: str, time_ms: float) -> None:
-        """Record a timing measurement for the given key."""
-        if key not in self._timings:
-            self._timings[key] = []
-        self._timings[key].append(time_ms)
+    def record(self, measurements: Mapping[str, float]) -> None:
+        """Record one inference step, preserving gaps in optional timing fields."""
+        for key in self._timings.keys() | measurements.keys():
+            self._timings.setdefault(key, [None] * self._num_steps).append(measurements.get(key))
+        self._num_steps += 1
 
     def get_stats(self, key: str) -> dict[str, float]:
         """Get statistics for the given key."""
-        times = self._timings[key]
+        times = [value for value in self._timings[key] if value is not None]
         return {
             "mean": float(np.mean(times)),
             "std": float(np.std(times)),
@@ -108,30 +112,40 @@ class TimingRecorder:
 def main(args: Args) -> None:
     if args.num_steps <= 0:
         raise ValueError("num_steps must be positive.")
+    if not 0 < args.port <= 65535:
+        raise ValueError("port must be between 1 and 65535.")
+    for name in ("connect_timeout", "inference_timeout"):
+        value = getattr(args, name)
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"{name} must be finite and positive.")
 
-    policy = _websocket_client_policy.WebsocketClientPolicy(
+    with _websocket_client_policy.WebsocketClientPolicy(
         host=args.host,
         port=args.port,
         api_key=args.api_key,
-    )
-    metadata = policy.get_server_metadata()
-    logger.info(f"Server metadata: {metadata}")
-    input_spec = _load_input_spec(metadata)
+        connect_timeout=args.connect_timeout,
+        inference_timeout=args.inference_timeout,
+    ) as policy:
+        metadata = policy.get_server_metadata()
+        logger.info(f"Server metadata: {metadata}")
+        input_spec = _load_input_spec(metadata)
 
-    # Send a few observations to make sure the model is loaded.
-    for _ in range(2):
-        policy.infer(_random_observation_libero(input_spec))
+        # Send a few observations to make sure the model is loaded.
+        for _ in range(2):
+            policy.infer(_random_observation_libero(input_spec))
 
-    timing_recorder = TimingRecorder()
+        timing_recorder = TimingRecorder()
 
-    for _ in tqdm.trange(args.num_steps, desc="Running policy"):
-        inference_start = time.time()
-        action = policy.infer(_random_observation_libero(input_spec))
-        timing_recorder.record("client_infer_ms", 1000 * (time.time() - inference_start))
-        for key, value in action.get("server_timing", {}).items():
-            timing_recorder.record(f"server_{key}", value)
-        for key, value in action.get("policy_timing", {}).items():
-            timing_recorder.record(f"policy_{key}", value)
+        for _ in tqdm.trange(args.num_steps, desc="Running policy"):
+            observation = _random_observation_libero(input_spec)
+            inference_start = time.perf_counter()
+            action = policy.infer(observation)
+            measurements = {"client_infer_ms": 1000 * (time.perf_counter() - inference_start)}
+            for key, value in action.get("server_timing", {}).items():
+                measurements[f"server_{key}"] = value
+            for key, value in action.get("policy_timing", {}).items():
+                measurements[f"policy_{key}"] = value
+            timing_recorder.record(measurements)
 
     timing_recorder.print_all_stats()
 

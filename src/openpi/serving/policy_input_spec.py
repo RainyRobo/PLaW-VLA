@@ -85,9 +85,9 @@ def build_server_metadata(train_config: "_config.TrainConfig") -> dict[str, Any]
 
 
 def build_from_train_config(train_config: "_config.TrainConfig") -> PolicyInputSpec:
-    from openpi.policies import libero_policy as _libero_policy
     from openpi.policies import aloha_policy as _aloha_policy
     from openpi.policies import libero_plus_policy as _libero_plus_policy
+    from openpi.policies import libero_policy as _libero_policy
 
     data_factory = dataclasses.replace(train_config.data, load_norm_stats=False)
     data_config = data_factory.create(train_config.assets_dirs, train_config.model)
@@ -101,7 +101,17 @@ def build_from_train_config(train_config: "_config.TrainConfig") -> PolicyInputS
         return PolicyInputSpec(family="aloha", image_keys=_dedupe_keys(temporal[0] if temporal else "cam_high", "cam_left_wrist", "cam_right_wrist"), temporal_image_keys=temporal, state_key=None if input_transform.pretrain_world_model else "state", history_step_offsets=_history_offsets(data_config, enabled=bool(temporal)), future_step_offsets=_future_offsets(data_config, enabled=bool(temporal)))
     if isinstance(input_transform, _libero_plus_policy.LiberoPlusInputs):
         temporal = tuple(input_transform.image_keys) if input_transform.enable_world_model else ()
-        return PolicyInputSpec(family="libero_plus", image_keys=_dedupe_keys(temporal[0] if temporal else "observation/front_image", "observation/wrist_image"), temporal_image_keys=temporal, state_key=None if input_transform.pretrain_world_model else "observation/state", history_step_offsets=_history_offsets(data_config, enabled=bool(temporal)), future_step_offsets=_future_offsets(data_config, enabled=bool(temporal)))
+        return PolicyInputSpec(
+            family="libero_plus",
+            image_keys=_dedupe_keys(temporal[0] if temporal else "observation/front_image", "observation/wrist_image"),
+            temporal_image_keys=temporal,
+            state_key=None if input_transform.pretrain_world_model else "observation/state",
+            history_step_offsets=_history_offsets(data_config, enabled=bool(temporal)),
+            future_step_offsets=_future_offsets(data_config, enabled=bool(temporal)),
+            state_gripper_format="two_finger_qpos",
+            action_gripper_format="signed_command",
+            normalization_contract=data_config.normalization_contract,
+        )
     if not isinstance(input_transform, _libero_policy.LiberoInputs):
         raise ValueError(
             f"Config {train_config.name!r} uses unsupported policy input transform "
@@ -125,9 +135,9 @@ def build_from_train_config(train_config: "_config.TrainConfig") -> PolicyInputS
 
 
 def _resolve_policy_input_transform(input_transforms: tuple[Any, ...]) -> Any:
-    from openpi.policies import libero_policy as _libero_policy
     from openpi.policies import aloha_policy as _aloha_policy
     from openpi.policies import libero_plus_policy as _libero_plus_policy
+    from openpi.policies import libero_policy as _libero_policy
 
     for transform in input_transforms:
         if isinstance(transform, (_libero_policy.LiberoInputs, _aloha_policy.AlohaInputs, _libero_plus_policy.LiberoPlusInputs)):

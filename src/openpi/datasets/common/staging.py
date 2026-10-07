@@ -48,7 +48,7 @@ def detect_filesystem_type(path: Path) -> str | None:
 
     mounts.sort(key=lambda item: len(item[0]), reverse=True)
     for mount_point, fs_type in mounts:
-        if candidate_str == mount_point or candidate_str.startswith(f"{mount_point}/"):
+        if mount_point == "/" or candidate_str == mount_point or candidate_str.startswith(f"{mount_point}/"):
             return fs_type
     return None
 
@@ -103,6 +103,8 @@ def publish_tree(source_root: Path, target_root: Path, *, overwrite: bool) -> No
     target_root = target_root.expanduser().resolve()
     if source_root == target_root:
         return
+    if source_root.is_relative_to(target_root) or target_root.is_relative_to(source_root):
+        raise ValueError("Staging source and output directories must not contain one another.")
 
     if target_root.exists():
         if not overwrite:

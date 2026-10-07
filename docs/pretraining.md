@@ -86,3 +86,13 @@ checkpoints/stage3_finetuning_libero/libero/<step>/
 ```
 
 Use the step directory, including its saved `assets/`, for checkpoint handoff and serving. The training script also saves optimizer and training state for resuming an interrupted run. Weights & Biases logging is enabled by default with project `plaw-vla`.
+
+Resume an experiment directly with the same recipe, experiment name, and original training overrides:
+
+```bash
+.venv/bin/python scripts/train_pytorch.py stage2_pretraining --exp-name joint --resume
+```
+
+Keep the original data sources, sampling weights, temporal schedule, batch size, worker count, number of processes, model, optimizer, and learning-rate schedule. The target `--num-train-steps` and logging/checkpoint intervals may change. Resumable checkpoints include `training_state.pt`, which restores each process's random state, temporal sampling, and next data batch; normalization comes from that step's original `assets/`. Standard Python, NumPy, and PyTorch randomness in workers is replayed. Custom transforms with external state must restore that state themselves.
+
+Checkpoints without `training_state.pt` cannot resume training; use their weights to initialize a new experiment. Inference does not require this file, but still needs the checkpoint's matching model configuration and normalization assets.

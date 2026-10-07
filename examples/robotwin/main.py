@@ -4,31 +4,32 @@
 # See LICENSE, NOTICE, and LICENSES/MIT-RoboTwin.txt.
 # Simulator paths and rendering settings must precede third-party imports.
 # ruff: noqa: E402
-import sys
-import os
 import dataclasses
-import subprocess
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
-import cv2
+import os
 from pathlib import Path
+import sys
+
+import cv2
+from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
+import matplotlib.pyplot as plt
 
 # Project layout:
 #   <repo>/examples/robotwin/          <- this file
 #   <repo>/third_party/robotwin/       <- RoboTwin codebase (envs, task_config, description, ...)
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _PROJECT_ROOT = _SCRIPT_DIR.parent.parent
-robowin_root = _PROJECT_ROOT / "third_party" / "robotwin"
-if not robowin_root.is_dir():
+_CALLER_DIR = Path.cwd()
+robotwin_root = _PROJECT_ROOT / "third_party" / "robotwin"
+if not robotwin_root.is_dir():
     raise FileNotFoundError(
-        f"RobotWin checkout not found at {robowin_root}; make sure third_party/robotwin/ is initialised."
+        f"RobotWin checkout not found at {robotwin_root}; make sure third_party/robotwin/ is initialised."
     )
 
 # RoboTwin tasks resolve ``task_config/*.yml`` and simulator resources from
 # the upstream checkout's root.
-if str(robowin_root) not in sys.path:
-    sys.path.insert(0, str(robowin_root))
-os.chdir(robowin_root)
+if str(robotwin_root) not in sys.path:
+    sys.path.insert(0, str(robotwin_root))
+os.chdir(robotwin_root)
 
 # Sibling helpers live in the same directory as this script. Put it on sys.path so
 # we can import them as top-level modules (no ``examples.`` package prefix needed).
@@ -43,21 +44,20 @@ if "ROBOTWIN_DENOISER" in os.environ:
     _set_denoiser = sapien.render.set_ray_tracing_denoiser
     sapien.render.set_ray_tracing_denoiser = lambda _: _set_denoiser(os.environ["ROBOTWIN_DENOISER"])
 
-import numpy as np
+import argparse
 from collections import deque
+from datetime import datetime
+from datetime import timezone
+import importlib
+import json
+import math
 import traceback
 
-import yaml
-from datetime import datetime
-import importlib
-import argparse
-
 import imageio
-from scipy.spatial.transform import Rotation as R
-import json
-
+import numpy as np
 from openpi_client.websocket_client_policy import WebsocketClientPolicy
-
+from scipy.spatial.transform import Rotation
+import yaml
 
 # ---------------------------------------------------------------------------
 # openpi RoboTwin server contract
@@ -189,6 +189,10 @@ def parse_server_contract(metadata: dict) -> ServerContract:
         )
     if list(history_step_offsets) != sorted(set(history_step_offsets)):
         raise RuntimeError(f"history_step_offsets must be strictly increasing; got {history_step_offsets}.")
+    if history_step_offsets[-1] != 0:
+        raise RuntimeError(
+            f"history_step_offsets must end with the current-frame offset 0; got {history_step_offsets}."
+        )
 
     # ``temporal_image_keys`` may be empty when the checkpoint disables the
     # world model (e.g. a vanilla pi0 stage). In that case we fall back to the
@@ -205,6 +209,10 @@ def parse_server_contract(metadata: dict) -> ServerContract:
         if not image_keys:
             raise RuntimeError("Server input_spec has no image_keys; cannot serve.")
         temporal_image_key = image_keys[0]
+
+    supported_cameras = {alias for alias, _ in _ROBOTWIN_CAMERA_SOURCES}
+    if not image_keys or not set(image_keys).issubset(supported_cameras):
+        raise RuntimeError(f"Unsupported camera keys {image_keys}; expected cameras from {sorted(supported_cameras)}.")
 
     return ServerContract(
         policy_config_name=str(metadata.get("policy_config_name") or "<unknown>"),
@@ -242,10 +250,7 @@ def _encode_robotwin_ee_state(endpose, *, expected_dim: int = _EE_BIMANUAL_DIM) 
     propagating mis-aligned tensors through the policy server.
     """
     state = np.array(
-        list(endpose["left_endpose"])
-        + [endpose["left_gripper"]]
-        + list(endpose["right_endpose"])
-        + [endpose["right_gripper"]],
+        [*endpose["left_endpose"], endpose["left_gripper"], *endpose["right_endpose"], endpose["right_gripper"]],
         dtype=np.float32,
     )
     if state.shape != (expected_dim,):
@@ -455,11 +460,14 @@ def normalize_robotwin_ee_action(
     if action.shape != (expected_dim,):
         raise ValueError(f"Expected {expected_dim}-D EE action (xyz+quat(w-first)+grip x 2), got shape={action.shape}.")
     out = action.copy()
+    if not np.isfinite(out).all():
+        raise ValueError("RoboTwin EEF actions must contain only finite values.")
     for quat_slice in _EE_QUAT_SLICES:
         q = out[quat_slice]
         norm = float(np.linalg.norm(q))
-        if norm > 1e-8:
-            out[quat_slice] = q / norm
+        if norm <= 1e-8:
+            raise ValueError("RoboTwin EEF action quaternions must have nonzero norm.")
+        out[quat_slice] = q / norm
     return out
 
 
@@ -473,8 +481,9 @@ def write_json(data: dict, fpath: Path) -> None:
         fpath (Path): The path to the output JSON file.
     """
     fpath.parent.mkdir(exist_ok=True, parents=True)
-    with open(fpath, "w") as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
+    temporary = fpath.with_name(fpath.name + ".tmp")
+    temporary.write_text(json.dumps(data, indent=4, ensure_ascii=False), encoding="utf-8")
+    temporary.replace(fpath)
 
 
 def add_title_bar(img, text, font_scale=0.8, thickness=2):
@@ -507,9 +516,8 @@ def quaternion_to_euler(quat):
     directly or every plotted euler angle is silently wrong.
     """
     qw, qx, qy, qz = quat
-    rotation = R.from_quat([qx, qy, qz, qw])
-    euler = rotation.as_euler("xyz", degrees=False)
-    return euler
+    rotation = Rotation.from_quat([qx, qy, qz, qw])
+    return rotation.as_euler("xyz", degrees=False)
 
 
 def visualize_action_step(action_history, step_idx, window=50):
@@ -564,7 +572,7 @@ def visualize_action_step(action_history, step_idx, window=50):
         ax1.plot(x_axis, history_subset[:, 7], label="left_grip", color="orange", linestyle=":", linewidth=2, alpha=0.8)
         ax1.set_ylabel("Position (m)")
         ax1.legend(loc="upper right", fontsize="x-small", ncol=4)
-        ax1.grid(True, alpha=0.3)
+        ax1.grid(visible=True, alpha=0.3)
         ax1.set_title(f"Step {step_idx}: Left Arm Position & Gripper")
 
         # Subplot 2: Left Arm Euler Angles (Roll, Pitch, Yaw)
@@ -573,7 +581,7 @@ def visualize_action_step(action_history, step_idx, window=50):
         ax2.plot(x_axis, left_euler[:, 2], label="left_yaw", color="y", linewidth=1.5)
         ax2.set_ylabel("Rotation (rad)")
         ax2.legend(loc="upper right", fontsize="x-small", ncol=3)
-        ax2.grid(True, alpha=0.3)
+        ax2.grid(visible=True, alpha=0.3)
         ax2.set_title("Left Arm Rotation (RPY from Quaternion)")
 
         # --- Right Arm ---
@@ -586,7 +594,7 @@ def visualize_action_step(action_history, step_idx, window=50):
         )
         ax3.set_ylabel("Position (m)")
         ax3.legend(loc="upper right", fontsize="x-small", ncol=4)
-        ax3.grid(True, alpha=0.3)
+        ax3.grid(visible=True, alpha=0.3)
         ax3.set_title("Right Arm Position & Gripper")
 
         # Subplot 4: Right Arm Euler Angles (Roll, Pitch, Yaw)
@@ -595,7 +603,7 @@ def visualize_action_step(action_history, step_idx, window=50):
         ax4.plot(x_axis, right_euler[:, 2], label="right_yaw", color="y", linewidth=1.5, linestyle="--")
         ax4.set_ylabel("Rotation (rad)")
         ax4.legend(loc="upper right", fontsize="x-small", ncol=3)
-        ax4.grid(True, alpha=0.3)
+        ax4.grid(visible=True, alpha=0.3)
         ax4.set_title("Right Arm Rotation (RPY from Quaternion)")
 
     # Set X-axis display range to maintain sliding window effect
@@ -707,29 +715,16 @@ def eval_function_decorator(policy_name, model_name):
         raise e
 
 
-def get_camera_config(camera_type):
-    camera_config_path = os.path.join(robowin_root, "task_config/_camera_config.yml")
-
-    assert os.path.isfile(camera_config_path), "task config file is missing"
-
-    with open(camera_config_path, "r", encoding="utf-8") as f:
-        args = yaml.load(f.read(), Loader=yaml.FullLoader)
-
-    assert camera_type in args, f"camera {camera_type} is not defined"
-    return args[camera_type]
-
-
 def get_embodiment_config(robot_file):
     robot_config_file = os.path.join(robot_file, "config.yml")
-    with open(robot_config_file, "r", encoding="utf-8") as f:
-        embodiment_args = yaml.load(f.read(), Loader=yaml.FullLoader)
-    return embodiment_args
+    with open(robot_config_file, encoding="utf-8") as f:
+        return yaml.load(f.read(), Loader=yaml.FullLoader)
 
 
 def main(usr_args):
     from envs import CONFIGS_PATH
 
-    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    current_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     task_name = usr_args["task_name"]
     task_config = usr_args["task_config"]
     ckpt_setting = usr_args["ckpt_setting"]
@@ -738,10 +733,8 @@ def main(usr_args):
     # Read the instruction split from the evaluation config.
     instruction_type = usr_args.get("instruction_type") or "unseen"
     save_dir = None
-    video_save_dir = None
-    video_size = None
 
-    with open(f"./task_config/{task_config}.yml", "r", encoding="utf-8") as f:
+    with open(f"./task_config/{task_config}.yml", encoding="utf-8") as f:
         args = yaml.load(f.read(), Loader=yaml.FullLoader)
 
     args["task_name"] = task_name
@@ -768,7 +761,7 @@ def main(usr_args):
     embodiment_type = args.get("embodiment")
     embodiment_config_path = os.path.join(CONFIGS_PATH, "_embodiment_config.yml")
 
-    with open(embodiment_config_path, "r", encoding="utf-8") as f:
+    with open(embodiment_config_path, encoding="utf-8") as f:
         _embodiment_types = yaml.load(f.read(), Loader=yaml.FullLoader)
 
     def get_embodiment_file(embodiment_type):
@@ -777,7 +770,7 @@ def main(usr_args):
             raise ValueError("No embodiment files")
         return robot_file
 
-    with open(CONFIGS_PATH + "_camera_config.yml", "r", encoding="utf-8") as f:
+    with open(CONFIGS_PATH + "_camera_config.yml", encoding="utf-8") as f:
         _camera_config = yaml.load(f.read(), Loader=yaml.FullLoader)
 
     head_camera_type = args["camera"]["head_camera_type"]
@@ -807,13 +800,6 @@ def main(usr_args):
     save_dir = Path(save_root) / task_name / task_config / current_time
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    if args["eval_video_log"]:
-        video_save_dir = save_dir
-        camera_config = get_camera_config(args["camera"]["head_camera_type"])
-        video_size = str(camera_config["w"]) + "x" + str(camera_config["h"])
-        video_save_dir.mkdir(parents=True, exist_ok=True)
-        args["eval_video_save_dir"] = video_save_dir
-
     print("============= Config =============\n")
     print("\033[95mMessy Table:\033[0m " + str(args["domain_randomization"]["cluttered_table"]))
     print("\033[95mRandom Background:\033[0m " + str(args["domain_randomization"]["random_background"]))
@@ -842,8 +828,6 @@ def main(usr_args):
 
     TASK_ENV = class_decorator(args["task_name"])
     args["policy_name"] = policy_name
-    usr_args["left_arm_dim"] = len(args["left_embodiment_config"]["arm_joints_name"][0])
-    usr_args["right_arm_dim"] = len(args["right_embodiment_config"]["arm_joints_name"][1])
 
     seed = usr_args["seed"]
 
@@ -854,79 +838,91 @@ def main(usr_args):
     test_num = usr_args["test_num"]
 
     server_host = os.environ.get("POLICY_SERVER_HOST", "localhost")
-    server_port = int(usr_args.get("port") or os.environ.get("POLICY_SERVER_PORT", "8000"))
-    model = WebsocketClientPolicy(host=server_host, port=server_port)
+    server_port = int(usr_args["port"])
+    model = WebsocketClientPolicy(
+        host=server_host,
+        port=server_port,
+        connect_timeout=usr_args["connect_timeout"],
+        inference_timeout=usr_args["inference_timeout"],
+    )
 
-    # Parse + validate the full server contract once, then thread it through
-    # every downstream call site. This is where we enforce alignment with the
-    # training pipeline: the parser refuses to run against a checkpoint whose
-    # action space / camera layout / temporal schedule we don't know how to
-    # serve. See :class:`ServerContract` for the full list of fields.
-    metadata = model.get_server_metadata() or {}
-    contract = parse_server_contract(metadata)
+    try:
+        # Parse + validate the full server contract once, then thread it through
+        # every downstream call site. This is where we enforce alignment with the
+        # training pipeline: the parser refuses to run against a checkpoint whose
+        # action space / camera layout / temporal schedule we don't know how to
+        # serve. See :class:`ServerContract` for the full list of fields.
+        metadata = model.get_server_metadata() or {}
+        contract = parse_server_contract(metadata)
 
-    # Cap the per-chunk execution budget at the server's action horizon.
-    replan_steps_raw = usr_args.get("replan_steps", usr_args.get("pi05_step"))
-    replan_steps_value = int(replan_steps_raw) if replan_steps_raw is not None else min(5, contract.action_horizon)
-    replan_steps_value = max(1, min(replan_steps_value, contract.action_horizon))
+        # Cap the per-chunk execution budget at the server's action horizon.
+        replan_steps_raw = usr_args.get("replan_steps")
+        replan_steps_value = int(replan_steps_raw) if replan_steps_raw is not None else min(5, contract.action_horizon)
+        if replan_steps_value < 1:
+            raise ValueError("replan_steps must be a positive integer.")
+        replan_steps_value = max(1, min(replan_steps_value, contract.action_horizon))
 
-    # An explicit asset id selects one normalization entry when task/config
-    # routing would be ambiguous. Set it in the config or ROBOTWIN_ASSET_ID.
-    asset_id_override = usr_args.get("asset_id") or os.environ.get("ROBOTWIN_ASSET_ID") or None
+        # An explicit asset id selects one normalization entry when task/config
+        # routing would be ambiguous. Set it in the config or ROBOTWIN_ASSET_ID.
+        asset_id_override = usr_args.get("asset_id") or os.environ.get("ROBOTWIN_ASSET_ID") or None
 
-    # Report the gaps between published history offsets, in executed actions.
-    offsets = contract.history_step_offsets
-    if len(offsets) >= 2:
-        gaps = [offsets[i + 1] - offsets[i] for i in range(len(offsets) - 1)]
-        history_stride_str = (
-            f"{gaps[0]} step{'s' if abs(gaps[0]) != 1 else ''}"
-            if all(g == gaps[0] for g in gaps)
-            else f"non-uniform gaps={gaps}"
+        # Report the gaps between published history offsets, in executed actions.
+        offsets = contract.history_step_offsets
+        if len(offsets) >= 2:
+            gaps = [offsets[i + 1] - offsets[i] for i in range(len(offsets) - 1)]
+            history_stride_str = (
+                f"{gaps[0]} step{'s' if abs(gaps[0]) != 1 else ''}"
+                if all(g == gaps[0] for g in gaps)
+                else f"non-uniform gaps={gaps}"
+            )
+        else:
+            history_stride_str = "(current frame only)"
+
+        print(
+            "[client] server contract:\n"
+            f"  policy_config_name        = {contract.policy_config_name}\n"
+            f"  family                    = {contract.family}\n"
+            f"  action_type / native_dim  = {contract.action_type} / {contract.native_action_dim}\n"
+            f"  action_horizon            = {contract.action_horizon}\n"
+            f"  image_keys                = {contract.image_keys}\n"
+            f"  temporal_image_key        = {contract.temporal_image_key}\n"
+            f"  state_key / prompt_key    = {contract.state_key!r} / {contract.prompt_key!r}\n"
+            f"  history_step_offsets      = {offsets}  (stride={history_stride_str})\n"
+            f"  history_buffer_capacity   = {contract.history_buffer_capacity}  "
+            f"(= max(-offsets)+1; covers dense one-frame-per-action pushes)\n"
+            f"  future_step_offsets       = {contract.future_step_offsets}  "
+            "(advertised by server; we only send history at inference)\n"
+            f"  replan_steps (per-chunk exec) = {replan_steps_value} (capped at action_horizon)\n"
+            f"  asset_id_override         = {asset_id_override!r}"
         )
-    else:
-        history_stride_str = "(current frame only)"
 
-    print(
-        "[client] server contract:\n"
-        f"  policy_config_name        = {contract.policy_config_name}\n"
-        f"  family                    = {contract.family}\n"
-        f"  action_type / native_dim  = {contract.action_type} / {contract.native_action_dim}\n"
-        f"  action_horizon            = {contract.action_horizon}\n"
-        f"  image_keys                = {contract.image_keys}\n"
-        f"  temporal_image_key        = {contract.temporal_image_key}\n"
-        f"  state_key / prompt_key    = {contract.state_key!r} / {contract.prompt_key!r}\n"
-        f"  history_step_offsets      = {offsets}  (stride={history_stride_str})\n"
-        f"  history_buffer_capacity   = {contract.history_buffer_capacity}  "
-        f"(= max(-offsets)+1; covers dense one-frame-per-action pushes)\n"
-        f"  future_step_offsets       = {contract.future_step_offsets}  "
-        "(advertised by server; we only send history at inference)\n"
-        f"  replan_steps (per-chunk exec) = {replan_steps_value} (capped at action_horizon)\n"
-        f"  asset_id_override         = {asset_id_override!r}"
-    )
+        st_seed, suc_num = eval_policy(
+            task_name,
+            TASK_ENV,
+            args,
+            model,
+            st_seed,
+            test_num=test_num,
+            instruction_type=instruction_type,
+            task_config=task_config,
+            replan_steps=replan_steps_value,
+            contract=contract,
+            asset_id_override=asset_id_override,
+        )
+        suc_nums.append(suc_num)
 
-    st_seed, suc_num = eval_policy(
-        task_name,
-        TASK_ENV,
-        args,
-        model,
-        st_seed,
-        test_num=test_num,
-        video_size=video_size,
-        instruction_type=instruction_type,
-        task_config=task_config,
-        replan_steps=replan_steps_value,
-        contract=contract,
-        asset_id_override=asset_id_override,
-    )
-    suc_nums.append(suc_num)
+        file_path = os.path.join(save_dir, "_result.txt")
+        with open(file_path, "w") as file:
+            file.write(f"Timestamp: {current_time}\n\n")
+            file.write(f"Instruction Type: {instruction_type}\n\n")
+            file.write("\n".join(map(str, np.array(suc_nums) / test_num)))
 
-    file_path = os.path.join(save_dir, "_result.txt")
-    with open(file_path, "w") as file:
-        file.write(f"Timestamp: {current_time}\n\n")
-        file.write(f"Instruction Type: {instruction_type}\n\n")
-        file.write("\n".join(map(str, np.array(suc_nums) / test_num)))
-
-    print(f"Data has been saved to {file_path}")
+        print(f"Data has been saved to {file_path}")
+    finally:
+        try:
+            model.close()
+        finally:
+            TASK_ENV.close_env()
 
 
 def format_obs(observation, prompt):
@@ -950,7 +946,6 @@ def eval_policy(
     model,
     st_seed,
     test_num=100,
-    video_size=None,
     instruction_type=None,
     task_config: str | None = None,
     replan_steps: int = 5,
@@ -977,7 +972,6 @@ def eval_policy(
 
     now_id = 0
     succ_seed = 0
-    suc_test_seed_list = []
 
     now_seed = st_seed
     clear_cache_freq = args["clear_cache_freq"]
@@ -1017,7 +1011,6 @@ def eval_policy(
 
         if (not expert_check) or (TASK_ENV.plan_success and TASK_ENV.check_success()):
             succ_seed += 1
-            suc_test_seed_list.append(now_seed)
         else:
             now_seed += 1
             args["render_freq"] = render_freq
@@ -1030,35 +1023,6 @@ def eval_policy(
         results = generate_episode_descriptions(args["task_name"], episode_info_list, test_num)
         instruction = np.random.choice(results[0][instruction_type])
         TASK_ENV.set_instruction(instruction=instruction)  # set language instruction
-
-        if TASK_ENV.eval_video_path is not None:
-            ffmpeg = subprocess.Popen(
-                [
-                    "ffmpeg",
-                    "-y",
-                    "-loglevel",
-                    "error",
-                    "-f",
-                    "rawvideo",
-                    "-pixel_format",
-                    "rgb24",
-                    "-video_size",
-                    video_size,
-                    "-framerate",
-                    "10",
-                    "-i",
-                    "-",
-                    "-pix_fmt",
-                    "yuv420p",
-                    "-vcodec",
-                    "libx264",
-                    "-crf",
-                    "23",
-                    f"{TASK_ENV.eval_video_path}/episode{TASK_ENV.test_num}.mp4",
-                ],
-                stdin=subprocess.PIPE,
-            )
-            TASK_ENV._set_eval_video_ffmpeg(ffmpeg)
 
         succ = False
 
@@ -1114,12 +1078,19 @@ def eval_policy(
             # chunk out.
             ret = model.infer(payload)
             actions = np.asarray(ret["actions"])
+            if actions.ndim != 2 or actions.shape[0] == 0 or actions.shape[1] < contract.native_action_dim:
+                raise ValueError(
+                    f"Expected nonempty [horizon, >= {contract.native_action_dim}] actions, got {actions.shape}."
+                )
+            if not np.isfinite(actions).all():
+                raise ValueError("Policy returned nonfinite RoboTwin actions.")
             # The model may have padded its action vector beyond
             # ``native_action_dim`` (e.g. PI0 pads to 32 internally); only the
             # first ``contract.native_action_dim`` cols are real EE values.
             actions = actions[:, : contract.native_action_dim]
             # Respect the per-chunk replanning budget.
-            actions = actions[:replan_steps]
+            remaining_steps = TASK_ENV.step_lim - TASK_ENV.take_action_cnt
+            actions = actions[: min(replan_steps, remaining_steps)]
 
             for raw_step in actions:
                 ee_action = normalize_robotwin_ee_action(raw_step, expected_dim=contract.native_action_dim)
@@ -1169,9 +1140,6 @@ def eval_policy(
                 save_path=str(out_img_file),
                 fps=15,  # Suggest adjusting fps based on simulation step
             )
-        if TASK_ENV.eval_video_path is not None:
-            TASK_ENV._del_eval_video_ffmpeg()
-
         if succ:
             TASK_ENV.suc += 1
             print("\033[92mSuccess!\033[0m")
@@ -1214,10 +1182,17 @@ def parse_args_and_config():
     parser.add_argument("--port", type=int, default=8001, help="remote policy socket port.")
     parser.add_argument("--save_root", type=str, default="results/default_vis_path")
     parser.add_argument("--test_num", type=int, default=100)
+    parser.add_argument("--connect_timeout", type=float, default=30.0)
+    parser.add_argument("--inference_timeout", type=float, default=60.0)
     args = parser.parse_args()
 
-    with open(args.config, "r", encoding="utf-8") as f:
+    config_path = Path(args.config).expanduser()
+    if not config_path.is_absolute():
+        config_path = _CALLER_DIR / config_path
+    with open(config_path, encoding="utf-8") as f:
         config = yaml.safe_load(f)
+    if not isinstance(config, dict):
+        parser.error("--config must contain a YAML mapping")
 
     # Parse overrides
     def parse_override_pairs(pairs):
@@ -1225,7 +1200,9 @@ def parse_args_and_config():
             parser.error("--overrides expects --key value pairs")
         override_dict = {}
         for i in range(0, len(pairs), 2):
-            key = pairs[i].lstrip("--")
+            if not pairs[i].startswith("--") or len(pairs[i]) == 2:
+                parser.error("--overrides expects --key value pairs")
+            key = pairs[i].removeprefix("--")
             value = pairs[i + 1]
             try:
                 import ast
@@ -1241,8 +1218,21 @@ def parse_args_and_config():
         config.update(overrides)
 
     # Apply CLI settings to the evaluation config consumed by ``main``.
-    for _key in ("save_root", "port", "test_num"):
+    for _key in ("save_root", "port", "test_num", "connect_timeout", "inference_timeout"):
         config[_key] = getattr(args, _key)
+    save_root = Path(config["save_root"]).expanduser()
+    if not save_root.is_absolute():
+        save_root = _CALLER_DIR / save_root
+    config["save_root"] = str(save_root.resolve())
+    if args.test_num < 1:
+        parser.error("--test_num must be a positive integer")
+    if not 1 <= args.port <= 65535:
+        parser.error("--port must be between 1 and 65535")
+    if not isinstance(config.get("seed"), int) or config["seed"] < 0:
+        parser.error("seed must be a nonnegative integer")
+    for name in ("connect_timeout", "inference_timeout"):
+        if not math.isfinite(config[name]) or config[name] <= 0:
+            parser.error(f"--{name} must be finite and positive")
 
     return config
 

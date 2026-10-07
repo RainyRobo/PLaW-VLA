@@ -26,15 +26,18 @@ distinct ``--node-rank`` for each::
         scripts/train_pytorch.py <config_name> --exp-name <run_name>
 """
 
+import copy
 import dataclasses
 import gc
 import logging
 import os
 import pathlib
 import platform
+import random
 import shutil
 import threading
 import time
+from typing import Any
 
 # The PyTorch trainer only uses JAX for tree/data utilities.  Keeping JAX on the
 # CPU prevents every DataLoader worker from probing CUDA, ROCm, and TPU backends
@@ -165,15 +168,24 @@ def _log_model_init_progress(stop_event: threading.Event, interval_seconds: floa
 
 def set_seed(seed: int, local_rank: int):
     torch.manual_seed(seed + local_rank)
-    np.random.seed(seed + local_rank)
+    np.random.seed((seed + local_rank) % 2**32)
+    random.seed(seed + local_rank)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed + local_rank)
 
 
-def build_datasets(config: _config.TrainConfig):
+def build_datasets(config: _config.TrainConfig, *, checkpoint_assets: pathlib.Path | None = None):
+    if checkpoint_assets is not None:
+        # A multi-dataset factory forwards these assets to every child factory.
+        # Override even explicitly configured live asset roots on resume.
+        factory = dataclasses.replace(
+            config.data,
+            assets=dataclasses.replace(config.data.assets, assets_dir=str(checkpoint_assets)),
+        )
+        config = dataclasses.replace(config, data=factory)
+        logging.info("Resuming with original normalization assets from %s", checkpoint_assets)
     # Use the unified data loader with PyTorch framework
-    data_loader = _data.create_data_loader(config, framework="pytorch", shuffle=True)
-    return data_loader
+    return _data.create_data_loader(config, framework="pytorch", shuffle=True)
 
 
 def _build_log_payload(
@@ -227,6 +239,37 @@ def get_model_parameters(model):
     )
 
 
+def _capture_rng_state() -> dict[str, Any]:
+    return {
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch": torch.get_rng_state(),
+        "cuda": torch.cuda.get_rng_state() if torch.cuda.is_initialized() else None,
+    }
+
+
+def _restore_rng_state(state: dict[str, Any]) -> None:
+    random.setstate(state["python"])
+    np.random.set_state(state["numpy"])
+    torch.set_rng_state(state["torch"])
+    if state["cuda"] is not None:
+        if not torch.cuda.is_available():
+            raise RuntimeError("This training checkpoint requires CUDA to restore its random state.")
+        torch.cuda.set_rng_state(state["cuda"])
+
+
+def _resume_config_signature(config: _config.TrainConfig) -> dict[str, Any]:
+    # The target step and logging/checkpoint frequency may change on resume.
+    # Architecture, objective and update rules must still describe the same run.
+    return {
+        "model": dataclasses.asdict(config.model),
+        "training_stage": config.training_stage,
+        "precision": config.pytorch_training_precision,
+        "optimizer": dataclasses.asdict(config.optimizer),
+        "lr_schedule": dataclasses.asdict(config.lr_schedule),
+    }
+
+
 def save_checkpoint(model, optimizer, global_step, config, is_main, data_loader):
     """Save a checkpoint with model state, optimizer state, and metadata."""
     # Only save if it's time to save or if it's the final step. Every rank must
@@ -235,6 +278,20 @@ def save_checkpoint(model, optimizer, global_step, config, is_main, data_loader)
     should_save = (global_step % config.save_interval == 0 and global_step > 0) or (
         global_step == config.num_train_steps
     )
+    if not should_save:
+        return
+    distributed = dist.is_available() and dist.is_initialized()
+    world_size = dist.get_world_size() if distributed else 1
+    rank_state = {
+        "rank": dist.get_rank() if distributed else 0,
+        "rng": _capture_rng_state(),
+        "data_loader": data_loader.state_dict(),
+    }
+    rank_states = [None] * world_size if is_main else None
+    if distributed:
+        dist.gather_object(rank_state, rank_states, dst=0)
+    else:
+        rank_states = [rank_state]
     if is_main and should_save:
         # Create temporary directory for atomic checkpoint saving
         final_ckpt_dir = config.checkpoint_dir / f"{global_step}"
@@ -259,6 +316,16 @@ def save_checkpoint(model, optimizer, global_step, config, is_main, data_loader)
             "timestamp": time.time(),
         }
         torch.save(metadata, tmp_ckpt_dir / "metadata.pt")
+        torch.save(
+            {
+                "version": 1,
+                "global_step": global_step,
+                "world_size": world_size,
+                "config": _resume_config_signature(config),
+                "ranks": rank_states,
+            },
+            tmp_ckpt_dir / "training_state.pt",
+        )
 
         # save norm stats
         _checkpoints.save_data_configs_assets(
@@ -278,23 +345,36 @@ def save_checkpoint(model, optimizer, global_step, config, is_main, data_loader)
         if config.wandb_enabled:
             wandb.log({"checkpoint_step": global_step}, step=global_step)
 
-    if should_save and dist.is_available() and dist.is_initialized():
+    if distributed:
         dist.barrier()
+    # Checkpoint I/O and logging must not advance the next training step's RNG.
+    _restore_rng_state(rank_state["rng"])
 
 
-def load_checkpoint(model, optimizer, checkpoint_dir, device):
-    """Load the latest checkpoint and return the global step."""
-    checkpoint_steps = [
-        int(d.name)
-        for d in checkpoint_dir.iterdir()
-        if d.is_dir() and d.name.isdigit() and not d.name.startswith("tmp_")
-    ]
-
-    if not checkpoint_steps:
-        raise FileNotFoundError(f"No checkpoints found in {checkpoint_dir}")
-
-    latest_step = max(checkpoint_steps)
-    ckpt_dir = checkpoint_dir / f"{latest_step}"
+def load_checkpoint(model, optimizer, checkpoint_dir, device, data_loader, config):
+    """Restore one selected step's weights, optimizer, data position and RNG."""
+    ckpt_dir = pathlib.Path(checkpoint_dir)
+    if not ckpt_dir.is_dir() or not ckpt_dir.name.isdigit():
+        raise ValueError(f"Expected a checkpoint step directory, got {ckpt_dir}.")
+    latest_step = int(ckpt_dir.name)
+    training_state_path = ckpt_dir / "training_state.pt"
+    if not training_state_path.is_file():
+        raise ValueError(
+            f"Checkpoint {ckpt_dir} has no training_state.pt and cannot resume its data or RNG state. "
+            "Use its weights to initialize a new experiment instead."
+        )
+    training_state = torch.load(training_state_path, map_location="cpu", weights_only=False)
+    distributed = dist.is_available() and dist.is_initialized()
+    world_size = dist.get_world_size() if distributed else 1
+    rank = dist.get_rank() if distributed else 0
+    if training_state.get("version") != 1 or training_state.get("world_size") != world_size:
+        raise ValueError("Resume requires a supported training state and the original number of DDP processes.")
+    if training_state.get("config") != _resume_config_signature(config):
+        raise ValueError("Resume requires the original model, training stage, precision, optimizer and LR schedule.")
+    rank_states = training_state.get("ranks", [])
+    if len(rank_states) != world_size or rank_states[rank].get("rank") != rank:
+        raise ValueError(f"Training checkpoint has no valid runtime state for rank {rank}.")
+    rank_state = rank_states[rank]
 
     # Clear memory before loading checkpoints
     if torch.cuda.is_available():
@@ -338,10 +418,17 @@ def load_checkpoint(model, optimizer, checkpoint_dir, device):
         logging.info("Loading metadata...")
         metadata = torch.load(ckpt_dir / "metadata.pt", map_location=device, weights_only=False)
         global_step = metadata.get("global_step", latest_step)
+        if global_step != latest_step or training_state.get("global_step") != global_step:
+            raise ValueError(f"Checkpoint {ckpt_dir} has inconsistent completed-step metadata.")
         del metadata
         torch.cuda.empty_cache()
         gc.collect()
         log_memory_usage(device, latest_step, "after_loading_metadata")
+
+        # Seeking can start workers and decode discarded samples. Restore the
+        # checkpoint's main-process RNG only after all of that work is complete.
+        data_loader.load_state_dict(rank_state["data_loader"])
+        _restore_rng_state(rank_state["rng"])
 
         logging.info(f"Successfully loaded all checkpoint components from step {latest_step}")
         return global_step
@@ -481,34 +568,74 @@ def log_sample_images_to_wandb(sample_batch: tuple[_model.Observation, _model.Ac
         torch.cuda.empty_cache()
 
 
-def _checkpoint_tensor_into_target(saved: torch.Tensor, target: torch.Tensor) -> torch.Tensor | None:
-    """Copy a checkpoint tensor into ``target`` when it is a leading sub-block."""
+def _checkpoint_tensor_into_target(key: str, saved: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Allow only the future-query table to grow during a training handoff."""
     if saved.shape == target.shape:
         return saved
-    if saved.ndim != target.ndim or any(saved_dim > target_dim for saved_dim, target_dim in zip(saved.shape, target.shape)):
-        return None
-    fitted = target.detach().clone()
-    fitted[tuple(slice(0, size) for size in saved.shape)] = saved.to(device=fitted.device, dtype=fitted.dtype)
-    return fitted
+    if (
+        key == "world_future_builder.slot_embed"
+        and saved.ndim == target.ndim == 3
+        and saved.shape[0] == target.shape[0]
+        and saved.shape[2] == target.shape[2]
+        and 0 < saved.shape[1] < target.shape[1]
+    ):
+        fitted = target.detach().clone()
+        fitted[:, : saved.shape[1], :] = saved.to(device=fitted.device, dtype=fitted.dtype)
+        logging.info("Expanded %s from %s to %s", key, tuple(saved.shape), tuple(target.shape))
+        return fitted
+    raise ValueError(
+        f"Incompatible checkpoint tensor {key!r}: saved shape {tuple(saved.shape)}, "
+        f"model shape {tuple(target.shape)}. Use a matching model configuration."
+    )
 
 
-def _load_pytorch_weights(model: torch.nn.Module, model_path: str) -> None:
-    """Load a checkpoint, expanding tensors that grew along their leading dimensions."""
+def _load_pytorch_weights(model: torch.nn.Module, model_path: str, *, training_stage: str) -> None:
+    """Validate stage initialization before loading any model weights.
+
+    Stage I may initialize its foundation from a base π₀.₅ checkpoint without
+    world-model tensors. Later handoffs require every model tensor, including
+    shared parameters omitted by SafeTensors, and reject structural mismatches.
+    """
     saved_state = safetensors.torch.load_file(model_path)
     target_state = model.state_dict()
-    loadable: dict[str, torch.Tensor] = {}
-    for key, saved in saved_state.items():
-        target = target_state.get(key)
-        if target is None:
-            continue
-        fitted = _checkpoint_tensor_into_target(saved, target)
-        if fitted is None:
-            logging.warning("Skipping %s: checkpoint shape %s does not fit target shape %s", key, tuple(saved.shape), tuple(target.shape))
-            continue
-        if tuple(saved.shape) != tuple(target.shape):
-            logging.info("Expanded %s from %s to %s", key, tuple(saved.shape), tuple(target.shape))
-        loadable[key] = fitted
+    unexpected = sorted(saved_state.keys() - target_state.keys())
+    if unexpected:
+        raise ValueError(f"Unexpected checkpoint tensors: {unexpected[:10]}")
+    if not saved_state:
+        raise ValueError(f"Checkpoint {model_path} contains no model tensors")
+
+    world_prefixes = (
+        "world_model_adapter.",
+        "world_future_builder.",
+        "world_pred_head.",
+        "paligemma_with_expert.gemma_world_model_expert.",
+    )
+    base_initialization = training_stage == "wm_alignment" and not any(
+        key.startswith(world_prefixes) for key in saved_state
+    )
+
+    # save_model writes only one name for tied parameters. Match exact tensor
+    # views so alias names do not masquerade as missing pretrained weights.
+    def tensor_view(tensor: torch.Tensor) -> tuple:
+        return (tensor.data_ptr(), tensor.storage_offset(), tuple(tensor.shape), tuple(tensor.stride()))
+
+    loaded_views = {tensor_view(target_state[key]) for key in saved_state}
+    missing = [
+        key
+        for key, target in target_state.items()
+        if key not in saved_state
+        and tensor_view(target) not in loaded_views
+        and not (base_initialization and key.startswith(world_prefixes))
+    ]
+    if missing:
+        raise ValueError(f"Missing checkpoint tensors for {training_stage}: {sorted(missing)[:10]}")
+    loadable = {
+        key: _checkpoint_tensor_into_target(key, saved, target_state[key])
+        for key, saved in saved_state.items()
+    }
     model.load_state_dict(loadable, strict=False)
+    if base_initialization:
+        logging.info("Initialized foundation weights; new world-model tensors keep their initial values")
 
 
 def train_loop(config: _config.TrainConfig):
@@ -530,6 +657,7 @@ def train_loop(config: _config.TrainConfig):
 
     # Initialize checkpoint directory and wandb
     resuming = False
+    resume_checkpoint_dir = None
     if config.resume:
         # Find checkpoint directory based on experiment name
         exp_checkpoint_dir = config.checkpoint_dir
@@ -537,6 +665,12 @@ def train_loop(config: _config.TrainConfig):
             # Use validation to find the latest working checkpoint
             latest_step = get_latest_checkpoint_step(exp_checkpoint_dir)
             if latest_step is not None:
+                resume_checkpoint_dir = exp_checkpoint_dir / str(latest_step)
+                if not (resume_checkpoint_dir / "training_state.pt").is_file():
+                    raise ValueError(
+                        f"Checkpoint {exp_checkpoint_dir / str(latest_step)} has no resumable training state. "
+                        "Use its weights to initialize a new experiment instead of --resume."
+                    )
                 resuming = True
                 logging.info(
                     f"Resuming from experiment checkpoint directory: {exp_checkpoint_dir} at step {latest_step}"
@@ -582,7 +716,10 @@ def train_loop(config: _config.TrainConfig):
     )
 
     # Pass the original batch size to data loader - it will handle DDP splitting internally
-    loader = build_datasets(config)
+    loader = build_datasets(
+        config,
+        checkpoint_assets=resume_checkpoint_dir / "assets" if resume_checkpoint_dir is not None else None,
+    )
 
     # Log sample images to wandb (only for main process on new runs)
     if is_main and config.wandb_enabled and not resuming:
@@ -603,7 +740,7 @@ def train_loop(config: _config.TrainConfig):
             pi05=getattr(config.model, "pi05", False),
         )
     else:
-        model_cfg = config.model
+        model_cfg = copy.copy(config.model)
         # Update dtype to match pytorch_training_precision
         object.__setattr__(model_cfg, "dtype", config.pytorch_training_precision)
 
@@ -687,14 +824,13 @@ def train_loop(config: _config.TrainConfig):
         )
 
     # Load weights from weight_loader if specified (for fine-tuning)
-    # Stage handoff: load the previous stage's PyTorch weights. Missing keys
-    # (for example newly expanded world-model slots) stay at their init values.
-    if config.pytorch_weight_path is not None:
+    # Stage handoff validates the foundation and world-model weights before loading.
+    if config.pytorch_weight_path is not None and not resuming:
         logging.info(f"Loading PI05 weights from: {config.pytorch_weight_path}")
 
         model_path = os.path.join(config.pytorch_weight_path, "model.safetensors")
         target_model = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
-        _load_pytorch_weights(target_model, model_path)
+        _load_pytorch_weights(target_model, model_path, training_stage=config.training_stage)
         logging.info(f"Loaded PyTorch weights from {config.pytorch_weight_path}")
 
     # Optimizer + learning rate schedule from config
@@ -720,7 +856,7 @@ def train_loop(config: _config.TrainConfig):
     # Load checkpoint if resuming
     global_step = 0
     if resuming:
-        global_step = load_checkpoint(model, optim, config.checkpoint_dir, device)
+        global_step = load_checkpoint(model, optim, resume_checkpoint_dir, device, loader, config)
         logging.info(f"Resumed training from step {global_step}")
 
     def lr_schedule(step: int):
@@ -767,17 +903,7 @@ def train_loop(config: _config.TrainConfig):
     )
 
     while global_step < config.num_train_steps:
-        # The loader iterator is infinite and advances its own sampler epoch
-        # after every dataset pass. This call only sets the first pass, so a
-        # resumed run does not replay the epoch-0 order.
-        if use_ddp and hasattr(loader, "set_epoch"):
-            loader.set_epoch(global_step // len(loader))
-
         for observation, actions in loader:
-            # Check if we've reached the target number of steps
-            if global_step >= config.num_train_steps:
-                break
-
             observation = jax.tree.map(
                 lambda x: x.to(device, non_blocking=True) if isinstance(x, torch.Tensor) else x,
                 observation,
@@ -876,6 +1002,8 @@ def train_loop(config: _config.TrainConfig):
                 pbar.set_postfix(
                     {"loss": f"{loss.item():.4f}", "lr": f"{optim.param_groups[0]['lr']:.2e}", "step": global_step}
                 )
+            if global_step >= config.num_train_steps:
+                break
 
     # Close progress bar
     if pbar is not None:

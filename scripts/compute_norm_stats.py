@@ -3,6 +3,7 @@
 """Compute state/action normalization statistics and save them with the training assets."""
 
 import dataclasses
+
 import numpy as np
 import torch
 import tqdm
@@ -30,7 +31,10 @@ class KeepKeys(transforms.DataTransformFn):
 
 def _norm_stats_model_config(model_config: _model.BaseModelConfig) -> _model.BaseModelConfig:
     if dataclasses.is_dataclass(model_config) and hasattr(model_config, "enable_world_model"):
-        return dataclasses.replace(model_config, enable_world_model=False)
+        overrides = {"enable_world_model": False}
+        if hasattr(model_config, "vjepa2_enable_input_projector"):
+            overrides["vjepa2_enable_input_projector"] = False
+        return dataclasses.replace(model_config, **overrides)
     return model_config
 
 
