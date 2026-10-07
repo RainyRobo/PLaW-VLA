@@ -19,7 +19,6 @@ from lerobot.datasets.video_utils import get_video_duration_in_s
 from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata  # noqa: F401
 from lerobot.utils.constants import HF_LEROBOT_HOME
 import numpy as np
-import pyarrow.parquet as pq
 from tqdm import tqdm
 
 from openpi.datasets.common.lerobot_v3 import DirectVideoLeRobotDataset
@@ -72,35 +71,6 @@ class EpisodeSpec:
 @dataclasses.dataclass(frozen=True)
 class JointSchema:
     joint_names: tuple[str, ...]
-
-
-def _replace_legacy_hf_list_markers(obj: Any) -> Any:
-    if isinstance(obj, dict):
-        out = {}
-        for key, value in obj.items():
-            out[key] = "Sequence" if key == "_type" and value == "List" else _replace_legacy_hf_list_markers(value)
-        return out
-    if isinstance(obj, list):
-        return [_replace_legacy_hf_list_markers(value) for value in obj]
-    return obj
-
-
-def _rewrite_parquet_hf_metadata(parquet_path: Path) -> None:
-    schema = pq.read_schema(parquet_path)
-    metadata = dict(schema.metadata or {})
-    hf_metadata = metadata.get(b"huggingface")
-    if hf_metadata is None:
-        return
-
-    parsed = json.loads(hf_metadata.decode("utf-8"))
-    rewritten = _replace_legacy_hf_list_markers(parsed)
-    if rewritten == parsed:
-        return
-
-    table = pq.read_table(parquet_path)
-    metadata[b"huggingface"] = json.dumps(rewritten, separators=(",", ":")).encode("utf-8")
-    table = table.replace_schema_metadata(metadata)
-    pq.write_table(table, parquet_path)
 
 
 class EgoDexDataset(DirectVideoLeRobotDataset):
@@ -314,11 +284,11 @@ def parse_part(part_name: str) -> tuple[str, int]:
 
 
 def resolve_data_root(data_dir: Path) -> Path:
-    if any((data_dir / d).exists() for d in ("part1", "test", "extra")):
+    if any((data_dir / d).is_dir() for d in _SUPPORTED_SPLIT_DIRS):
         return data_dir
     if (data_dir / "v1").exists():
         nested = data_dir / "v1"
-        if any((nested / d).exists() for d in ("part1", "test", "extra")):
+        if any((nested / d).is_dir() for d in _SUPPORTED_SPLIT_DIRS):
             return nested
     return data_dir
 

@@ -35,17 +35,28 @@ uv run --project examples/intern_a1 --frozen python examples/intern_a1/convert_i
   --input-root data/raw/intern_a1/extracted --output-dir data/pretrain/intern_a1
 ```
 
-For the provider's v3.0 archives, use `extract_interndata_a1_v30.py --source-root ... --output-dir ...`, followed by `merge_interndata_a1_v30.py --input-root ... --output-dir data/pretrain/intern_a1`. Outputs are grouped by embodiment. EEF poses use scalar-first quaternions; joint-space source layouts retain their declared semantics. Camera masks identify missing views.
+For the provider's v3.0 simulation archives, use this alternative workflow in the same environment:
+
+```bash
+uv run --project examples/intern_a1 --frozen python examples/intern_a1/extract_interndata_a1_v30.py \
+  --source-root data/raw/intern_a1/sim_updated_lerobotv30 --output-dir data/raw/intern_a1/extracted_v30
+uv run --project examples/intern_a1 --frozen python examples/intern_a1/merge_interndata_a1_v30.py \
+  --input-root data/raw/intern_a1/extracted_v30 --output-dir data/pretrain/intern_a1
+```
+
+Use one source-format workflow per output directory. Outputs are grouped by embodiment. EEF poses use scalar-first quaternions; joint-space source layouts retain their declared semantics. Camera masks identify missing views.
 
 ## AgiBotWorld
+
+`--src-path` must contain `task_info/`, `observations/`, and `proprio_stats/` directly. The download helper places full datasets in `AgiBotWorld-Alpha` or `AgiBotWorld-Beta` under the selected output directory. For Beta:
 
 ```bash
 uv sync --project examples/agibotworld --python 3.12 --frozen
 uv run --project examples/agibotworld --frozen python examples/agibotworld/convert_agibotworld_to_lerobot.py \
-  --src-path data/raw/agibotworld --output-dir data/pretrain/agibotworld
+  --src-path data/raw/agibotworld/AgiBotWorld-Beta --output-dir data/pretrain/agibotworld
 ```
 
-The converter discovers gripper and dexterous-hand tasks, groups outputs by effector, and writes shared camera names with each effector's state/action layout recorded in metadata. `--task-ids`, `--episodes-per-task`, and `--max-tasks` select local subsets. The raw format is recorded at its source frame rate; the training loader applies time-based sampling.
+For Alpha or the sample archive, set `--src-path` to the corresponding extracted raw-data directory. The converter discovers gripper and dexterous-hand tasks, groups outputs by effector, and writes shared camera names with each effector's state/action layout recorded in metadata. `--task-ids`, `--episodes-per-task`, and `--max-tasks` select local subsets. The converter expects the source's 30 Hz frame layout and writes 30 Hz timestamps; the training loader applies time-based sampling.
 
 ## RoboTwin EEF datasets and format upgrades
 

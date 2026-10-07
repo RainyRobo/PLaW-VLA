@@ -233,7 +233,7 @@ def save_checkpoint(model, optimizer, global_step, config, is_main, data_loader)
     # evaluate the same condition and wait together; otherwise the next step's
     # dropout broadcast starts while rank 0 is still writing the checkpoint.
     should_save = (global_step % config.save_interval == 0 and global_step > 0) or (
-        global_step == config.num_train_steps - 1
+        global_step == config.num_train_steps
     )
     if is_main and should_save:
         # Create temporary directory for atomic checkpoint saving
@@ -376,8 +376,7 @@ def log_memory_usage(device, step, phase="unknown"):
 
     memory_allocated = torch.cuda.memory_allocated(device) / 1e9
     memory_reserved = torch.cuda.memory_reserved(device) / 1e9
-    memory_free = torch.cuda.memory_reserved(device) - torch.cuda.memory_allocated(device)
-    memory_free = memory_free / 1e9
+    memory_free = torch.cuda.mem_get_info(device)[0] / 1e9
 
     # Get more detailed memory info
     memory_stats = torch.cuda.memory_stats(device)
@@ -516,6 +515,18 @@ def train_loop(config: _config.TrainConfig):
     use_ddp, local_rank, device = setup_ddp()
     is_main = (not use_ddp) or (dist.get_rank() == 0)
     set_seed(config.seed, local_rank)
+
+    if not config.resume and not config.overwrite:
+        # Rank 0 checks before creating the directory, then shares the result so
+        # every DDP process exits together instead of waiting at the next barrier.
+        existing_directory = [config.checkpoint_dir.exists() if is_main else False]
+        if use_ddp:
+            dist.broadcast_object_list(existing_directory, src=0)
+        if existing_directory[0]:
+            raise FileExistsError(
+                f"Experiment directory {config.checkpoint_dir} already exists. "
+                "Use a new --exp-name, --resume, or --overwrite."
+            )
 
     # Initialize checkpoint directory and wandb
     resuming = False

@@ -36,11 +36,11 @@ def _ensure_import_paths() -> None:
 
 _ensure_import_paths()
 
-import extract_interndata_a1 as extract_v21
+import extract_interndata_a1 as extract_v21  # noqa: E402
 
-from openpi.datasets.common import progress as progress_display
-from openpi.datasets.specs import intern_a1 as common
-from openpi.datasets.specs import intern_a1_v30 as common_v30
+from openpi.datasets.common import progress as progress_display  # noqa: E402
+from openpi.datasets.specs import intern_a1 as common  # noqa: E402
+from openpi.datasets.specs import intern_a1_v30 as common_v30  # noqa: E402
 
 CONSOLE = progress_display.get_console()
 
@@ -113,7 +113,10 @@ def _extract_archive(
             embodiment=embodiment,
             archive_path=archive_path,
         )
-        target_root = output_root / category / embodiment / Path(*target_suffix.parts)
+        candidate_root = (output_root / category / embodiment / Path(*target_suffix.parts)).resolve()
+        if not candidate_root.is_relative_to(output_root.resolve()):
+            raise ValueError(f"Archive dataset path must remain within {output_root}.")
+        target_root = candidate_root
 
         info_path = target_root / "meta" / "info.json"
         if info_path.exists():
@@ -227,6 +230,9 @@ def main(args: Args) -> None:
         raise FileNotFoundError(f"No InternData-A1 v3 archives found under {args.source_root}.")
 
     output_root = args.output_dir.expanduser().resolve()
+    source_root = args.source_root.expanduser().resolve()
+    if output_root == source_root or output_root in source_root.parents:
+        raise ValueError("Output directory must not be the input directory or an ancestor of it.")
     output_root.mkdir(parents=True, exist_ok=True)
     workers = _resolve_num_workers(args.num_workers, len(archives))
     summary: list[dict[str, str | int]] = []

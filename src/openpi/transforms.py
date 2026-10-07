@@ -6,7 +6,6 @@ import re
 from typing import Protocol, TypeAlias, TypeVar, runtime_checkable
 
 import flax.traverse_util as traverse_util
-import jax
 import numpy as np
 from openpi_client import image_tools
 

@@ -58,7 +58,6 @@ CONSOLE = progress_display.get_console()
 class Args:
     output_dir: Path
     input_root: Path = common.DEFAULT_RAW_OUTPUT_ROOT
-    staging_root: Path | None = None
     asset_output_dir: Path | None = None
     ray_temp_root: Path | None = None
     cleanup_tmp_on_success: bool = False
@@ -78,7 +77,6 @@ class Args:
     conversion_num_workers: int | None = None
     episode_commit_batch_size: int | None = None
     max_inflight_episodes: int | None = None
-    video_link_mode: common.MergeLinkMode = "copy"
     push_to_hub: bool = False
     hub_owner: str | None = None
     summary_path: Path | None = None
@@ -210,7 +208,6 @@ def _build_embodiment_dataset(job: dict[str, Any], *, workers: int) -> dict[str,
     cleanup_resolved_failures = bool(job.get("cleanup_resolved_failures", False))
     episode_commit_batch_size = job["episode_commit_batch_size"]
     max_inflight_episodes = int(job["max_inflight_episodes"])
-    video_link_mode = str(job["video_link_mode"])
 
     if output_dir.exists():
         if resume:
@@ -418,7 +415,7 @@ def _build_embodiment_dataset(job: dict[str, Any], *, workers: int) -> dict[str,
             convert_inner._save_prepared_episode_batch(
                 dataset,
                 payload_batch,
-                link_mode=video_link_mode,
+                link_mode="copy",
                 on_episode_saved=_on_episode_saved,
             )
             _persist_saved_payloads(saved_payloads)
@@ -439,7 +436,7 @@ def _build_embodiment_dataset(job: dict[str, Any], *, workers: int) -> dict[str,
                 convert_inner._save_prepared_episode_batch(
                     dataset,
                     [payload],
-                    link_mode=video_link_mode,
+                    link_mode="copy",
                     on_episode_saved=lambda _offset, episode_index, payload=payload: single_saved_payloads.append(
                         (payload, episode_index)
                     ),
@@ -582,15 +579,13 @@ def main(args: Args) -> None:
     if not grouped_dataset_dirs:
         raise FileNotFoundError(f"No extracted InternData-A1 datasets found under {args.input_root}.")
 
+    input_root = args.input_root.expanduser().resolve()
     output_root = args.output_dir.expanduser().resolve()
+    if output_root == input_root or output_root in input_root.parents:
+        raise ValueError("Output directory must not be the input directory or an ancestor of it.")
     if args.resume and args.overwrite:
         raise ValueError("--resume and --overwrite are mutually exclusive.")
-    if args.staging_root is not None:
-        CONSOLE.print("[yellow]Ignoring --staging-root: shard mode writes directly to --output-dir.")
-    if args.video_link_mode != "copy":
-        CONSOLE.print("[yellow]Ignoring --video-link-mode: conversion now always writes real shard files.")
     build_root = output_root
-    using_staging = False
     asset_output_dir = args.asset_output_dir.expanduser().resolve() if args.asset_output_dir is not None else None
     if output_root.exists() and not (args.overwrite or args.resume):
         raise FileExistsError(f"Output already exists: {output_root}")
@@ -624,7 +619,6 @@ def main(args: Args) -> None:
             "write_asset_norm_stats": args.write_asset_norm_stats,
             "validate_source_videos": args.validate_source_videos,
             "episode_commit_batch_size": args.episode_commit_batch_size,
-            "video_link_mode": args.video_link_mode,
             "selected_episode_count": _count_selected_episodes(paths, args.max_episodes_per_dataset),
         }
         for embodiment, paths in sorted(grouped_dataset_dirs.items())
@@ -651,7 +645,6 @@ def main(args: Args) -> None:
             [
                 ("Input Root", args.input_root),
                 ("Output Dir", output_root),
-                ("Build Root", build_root if using_staging else "in-place"),
                 ("Asset Dir", asset_output_dir if args.write_asset_norm_stats else "disabled"),
                 ("Embodiments", ", ".join(embodiment for embodiment, _ in sorted(grouped_dataset_dirs.items()))),
                 ("Selected Episodes", total_selected_episodes),

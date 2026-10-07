@@ -1,5 +1,7 @@
 # Derived from openpi (Copyright 2024 Physical Intelligence, Inc.; Apache-2.0).
 # Modified for PLaW-VLA by the PLaW-VLA authors, 2026.
+from __future__ import annotations
+
 import logging
 import threading
 import time
@@ -32,7 +34,7 @@ class Runtime:
         self._episode_steps = 0
 
     def run(self) -> None:
-        """Runs the runtime loop continuously until stop() is called or the environment is done."""
+        """Run the requested number of episodes, then reset the environment."""
         for _ in range(self._num_episodes):
             self._run_episode()
 
@@ -64,7 +66,6 @@ class Runtime:
 
         while self._in_episode:
             self._step()
-            self._episode_steps += 1
 
             # Sleep to maintain the desired frame rate
             now = time.time()
@@ -84,6 +85,7 @@ class Runtime:
         observation = self._environment.get_observation()
         action = self._agent.get_action(observation)
         self._environment.apply_action(action)
+        self._episode_steps += 1
 
         for subscriber in self._subscribers:
             subscriber.on_step(observation, action)

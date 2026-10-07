@@ -186,6 +186,4 @@ PLaW-VLA code is licensed under [Apache-2.0](LICENSE), with third-party exceptio
 
 ## Acknowledgments
 
-This implementation builds on [openpi](https://github.com/Physical-Intelligence/openpi) for the base policy and training infrastructure, [V-JEPA 2](https://github.com/facebookresearch/vjepa2) for visual predictive representations, and [Big Vision](https://github.com/google-research/big_vision) for vision-language model components. We thank the authors for making these foundations available to the robotics community.
-
-We also thank [LIBERO](https://github.com/Lifelong-Robot-Learning/LIBERO) for the evaluation environment, [LeRobot](https://github.com/huggingface/lerobot) for dataset tools, and [any4lerobot](https://github.com/Tavish9/any4lerobot) for conversion utilities adapted in this repository.
+This implementation builds on [openpi](https://github.com/Physical-Intelligence/openpi) for the base policy and training infrastructure and [V-JEPA 2](https://github.com/facebookresearch/vjepa2) for visual predictive representations. We also thank [LIBERO](https://github.com/Lifelong-Robot-Learning/LIBERO) for the evaluation environment, [LeRobot](https://github.com/huggingface/lerobot) for dataset tools, and [any4lerobot](https://github.com/Tavish9/any4lerobot) for conversion utilities adapted in this repository.

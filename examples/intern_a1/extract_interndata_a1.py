@@ -308,11 +308,11 @@ def _archive_result(
 
 def _safe_output_path(root: Path, relative_path: PurePosixPath) -> Path:
     destination = root.joinpath(*relative_path.parts)
-    destination.parent.mkdir(parents=True, exist_ok=True)
     resolved_root = root.resolve()
     resolved_destination = destination.resolve()
     if not resolved_destination.is_relative_to(resolved_root):
         raise ValueError(f"Refusing to write outside {root}: {relative_path}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
     return destination
 
 
@@ -374,7 +374,10 @@ def _extract_archive(
             embodiment=embodiment,
             archive_path=archive_path,
         )
-        target_root = output_root / category / embodiment / Path(*target_suffix.parts)
+        candidate_root = (output_root / category / embodiment / Path(*target_suffix.parts)).resolve()
+        if not candidate_root.is_relative_to(output_root.resolve()):
+            raise ValueError(f"Archive dataset path must remain within {output_root}.")
+        target_root = candidate_root
 
         info_path = target_root / "meta" / "info.json"
         if info_path.exists():
@@ -488,6 +491,9 @@ def main(args: Args) -> None:
         raise FileNotFoundError(f"No InternData-A1 archives found under {args.source_root}.")
 
     output_root = args.output_dir.expanduser().resolve()
+    source_root = args.source_root.expanduser().resolve()
+    if output_root == source_root or output_root in source_root.parents:
+        raise ValueError("Output directory must not be the input directory or an ancestor of it.")
     output_root.mkdir(parents=True, exist_ok=True)
     workers = _resolve_num_workers(args.num_workers, len(archives))
     summary: list[dict[str, str | int]] = []

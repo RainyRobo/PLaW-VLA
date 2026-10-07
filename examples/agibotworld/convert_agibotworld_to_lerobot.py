@@ -63,7 +63,6 @@ PREPARE_RETRY_ATTEMPTS = 2
 class Args:
     output_dir: Path
     src_path: Path = Path("data/raw/agibotworld")
-    staging_root: Path | None = None
     tmp_dir: Path | None = None
     ray_temp_root: Path | None = None
     cleanup_tmp_on_success: bool = False
@@ -82,7 +81,6 @@ class Args:
     conversion_num_workers: int | None = None
     episode_commit_batch_size: int | None = None
     max_inflight_episodes: int | None = None
-    video_link_mode: MergeLinkMode = "copy"
     push_to_hub: bool = False
     hub_owner: str | None = None
     summary_json: Path | None = None
@@ -814,7 +812,6 @@ def _build_embodiment_dataset(job: dict[str, Any], *, workers: int) -> dict[str,
     keep_extra_fields = bool(job["keep_extra_fields"])
     episode_commit_batch_size = int(job["episode_commit_batch_size"])
     max_inflight_episodes = int(job["max_inflight_episodes"])
-    video_link_mode = str(job["video_link_mode"])
     selected_tasks = [
         convert_inner.TaskSpec(
             json_file=Path(task["json_file"]),
@@ -983,7 +980,7 @@ def _build_embodiment_dataset(job: dict[str, Any], *, workers: int) -> dict[str,
                 _save_prepared_episode_batch(
                     dataset,
                     payload_batch,
-                    link_mode=video_link_mode,
+                    link_mode="copy",
                     on_episode_saved=_on_episode_saved,
                 )
                 _persist_saved_payloads(saved_payloads)
@@ -1004,7 +1001,7 @@ def _build_embodiment_dataset(job: dict[str, Any], *, workers: int) -> dict[str,
                     _save_prepared_episode_batch(
                         dataset,
                         [payload],
-                        link_mode=video_link_mode,
+                        link_mode="copy",
                         on_episode_saved=lambda _offset, episode_index, payload=payload: single_saved_payloads.append(
                             (payload, episode_index)
                         ),
@@ -1146,14 +1143,11 @@ def main(args: Args) -> None:
         raise FileNotFoundError(f"Source path does not exist: {src}")
 
     output_root = args.output_dir.expanduser().resolve()
+    if output_root == src or output_root in src.parents:
+        raise ValueError("Output directory must not be the input directory or an ancestor of it.")
     if args.resume and args.overwrite:
         raise ValueError("--resume and --overwrite are mutually exclusive.")
-    if args.staging_root is not None:
-        CONSOLE.print("[yellow]Ignoring --staging-root: shard mode writes directly to --output-dir.")
-    if args.video_link_mode != "copy":
-        CONSOLE.print("[yellow]Ignoring --video-link-mode: conversion now always writes real shard files.")
     build_root = output_root
-    using_staging = False
     if output_root.exists() and not (args.overwrite or args.resume):
         raise FileExistsError(f"Output already exists: {output_root}")
     if build_root.exists() and args.overwrite:
@@ -1220,8 +1214,7 @@ def main(args: Args) -> None:
                 "keep_extra_fields": args.keep_extra_fields,
                 "resume": args.resume,
                 "cleanup_resolved_failures": args.cleanup_resolved_failures,
-                "video_link_mode": args.video_link_mode,
-            }
+                }
         )
 
     if not jobs:
@@ -1250,7 +1243,6 @@ def main(args: Args) -> None:
             [
                 ("Source", src),
                 ("Output Dir", output_root),
-                ("Build Root", build_root if using_staging else "in-place"),
                 ("Embodiments", ", ".join(job["eef_type"] for job in jobs)),
                 ("Selected Tasks", total_selected_tasks),
                 ("Selected Episodes", total_selected_episodes),

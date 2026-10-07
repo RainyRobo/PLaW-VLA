@@ -2,6 +2,8 @@
 # LingBot-VLA (Copyright 2026 Robbyant Team; Apache-2.0).
 # Modified for PLaW-VLA by the PLaW-VLA authors, 2026.
 # See LICENSE, NOTICE, and LICENSES/MIT-RoboTwin.txt.
+# Simulator paths and rendering settings must precede third-party imports.
+# ruff: noqa: E402
 import sys
 import os
 import dataclasses
@@ -692,8 +694,8 @@ def class_decorator(task_name):
     try:
         env_class = getattr(envs_module, task_name)
         env_instance = env_class()
-    except:
-        raise SystemExit("No Task")
+    except Exception as exc:
+        raise SystemExit(f"Unable to initialize RoboTwin task {task_name}: {exc}") from exc
     return env_instance
 
 
@@ -826,13 +828,13 @@ def main(usr_args):
     print(
         "\033[94mHead Camera Config:\033[0m "
         + str(args["camera"]["head_camera_type"])
-        + f", "
+        + ", "
         + str(args["camera"]["collect_head_camera"])
     )
     print(
         "\033[94mWrist Camera Config:\033[0m "
         + str(args["camera"]["wrist_camera_type"])
-        + f", "
+        + ", "
         + str(args["camera"]["collect_wrist_camera"])
     )
     print("\033[94mEmbodiment Config:\033[0m " + embodiment_name)
@@ -918,7 +920,7 @@ def main(usr_args):
     )
     suc_nums.append(suc_num)
 
-    file_path = os.path.join(save_dir, f"_result.txt")
+    file_path = os.path.join(save_dir, "_result.txt")
     with open(file_path, "w") as file:
         file.write(f"Timestamp: {current_time}\n\n")
         file.write(f"Instruction Type: {instruction_type}\n\n")
@@ -965,7 +967,6 @@ def eval_policy(
     # Effective per-chunk execution budget (already capped by ``contract.action_horizon``
     # at the call site; clamp again here so direct callers of eval_policy stay safe).
     replan_steps = max(1, min(int(replan_steps), contract.action_horizon))
-    history_step_offsets = contract.history_step_offsets
     # Retain consecutive observations through the oldest requested history
     # offset. This can require more frames than the number sent to the server.
     history_buffer_capacity = contract.history_buffer_capacity
@@ -992,7 +993,7 @@ def eval_policy(
                 TASK_ENV.setup_demo(now_ep_num=now_id, seed=now_seed, is_test=True, **args)
                 episode_info = TASK_ENV.play_once()
                 TASK_ENV.close_env()
-            except UnStableError as e:
+            except UnStableError:
                 TASK_ENV.close_env()
                 now_seed += 1
                 args["render_freq"] = render_freq

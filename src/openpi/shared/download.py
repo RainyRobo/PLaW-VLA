@@ -60,32 +60,30 @@ def maybe_download(url: str, *, force_download: bool = False, **kwargs) -> pathl
     local_path = cache_dir / parsed.netloc / parsed.path.strip("/")
     local_path = local_path.resolve()
 
-    # Check if the cache should be invalidated.
-    invalidate_cache = False
-    if local_path.exists():
-        if force_download or _should_invalidate_cache(cache_dir, local_path):
-            invalidate_cache = True
-        else:
-            return local_path
+    if local_path.exists() and not force_download and not _should_invalidate_cache(cache_dir, local_path):
+        return local_path
 
     try:
         lock_path = local_path.with_suffix(".lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
         with filelock.FileLock(lock_path):
             # Ensure consistent permissions for the lock file.
             _ensure_permissions(lock_path)
-            # First, remove the existing cache if it is expired.
-            if invalidate_cache:
-                logger.info(f"Removing expired cached entry: {local_path}")
-                if local_path.is_dir():
-                    shutil.rmtree(local_path)
-                else:
-                    local_path.unlink()
+            # Another process may have populated the cache while we waited.
+            if local_path.exists() and not force_download and not _should_invalidate_cache(cache_dir, local_path):
+                return local_path
 
             # Download the data to a local cache.
             logger.info(f"Downloading {url} to {local_path}")
             scratch_path = local_path.with_suffix(".partial")
-            _download_fsspec(url, scratch_path, **kwargs)
-
+            _remove_cached_path(scratch_path)
+            try:
+                _download_fsspec(url, scratch_path, **kwargs)
+            except BaseException:
+                _remove_cached_path(scratch_path)
+                raise
+            # Keep an existing entry intact until its replacement is ready.
+            _remove_cached_path(local_path)
             shutil.move(scratch_path, local_path)
             _ensure_permissions(local_path)
 
@@ -99,8 +97,15 @@ def maybe_download(url: str, *, force_download: bool = False, **kwargs) -> pathl
     return local_path
 
 
+def _remove_cached_path(path: pathlib.Path) -> None:
+    if path.is_dir():
+        shutil.rmtree(path)
+    else:
+        path.unlink(missing_ok=True)
+
+
 def _download_fsspec(url: str, local_path: pathlib.Path, **kwargs) -> None:
-    """Download a file from a remote filesystem to the local cache, and return the local path."""
+    """Download a remote file or directory, propagating transfer failures."""
     fs, _ = fsspec.core.url_to_fs(url, **kwargs)
     info = fs.info(url)
     # Folders are represented by 0-byte objects with a trailing forward slash.
@@ -108,13 +113,16 @@ def _download_fsspec(url: str, local_path: pathlib.Path, **kwargs) -> None:
         total_size = fs.du(url)
     else:
         total_size = info["size"]
-    with tqdm.tqdm(total=total_size, unit="iB", unit_scale=True, unit_divisor=1024) as pbar:
-        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    with (
+        tqdm.tqdm(total=total_size, unit="iB", unit_scale=True, unit_divisor=1024) as pbar,
+        concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor,
+    ):
         future = executor.submit(fs.get, url, local_path, recursive=is_dir)
         while not future.done():
             current_size = sum(f.stat().st_size for f in [*local_path.rglob("*"), local_path] if f.is_file())
             pbar.update(current_size - pbar.n)
             time.sleep(1)
+        future.result()
         pbar.update(total_size - pbar.n)
 
 
@@ -168,7 +176,7 @@ def _ensure_permissions(path: pathlib.Path) -> None:
 def _get_mtime(year: int, month: int, day: int) -> float:
     """Get the mtime of a given date at midnight UTC."""
     date = datetime.datetime(year, month, day, tzinfo=datetime.UTC)
-    return time.mktime(date.timetuple())
+    return date.timestamp()
 
 
 # Map of relative paths, defined as regular expressions, to expiration timestamps (mtime format).

@@ -29,9 +29,10 @@ def parse_part(part_name: str) -> tuple[str, int]:
 
 
 def resolve_data_root(data_dir: Path) -> Path:
-    if any((data_dir / d).exists() for d in ("part1", "test", "extra")):
+    splits = ("part1", "part2", "part3", "part4", "part5", "test", "extra")
+    if any((data_dir / d).is_dir() for d in splits):
         return data_dir
-    if (data_dir / "v1").exists() and any((data_dir / "v1" / d).exists() for d in ("part1", "test", "extra")):
+    if (data_dir / "v1").is_dir() and any((data_dir / "v1" / d).is_dir() for d in splits):
         return data_dir / "v1"
     return data_dir
 
@@ -43,7 +44,10 @@ def iter_pairs(data_root: Path):
         for task_dir in sorted(p for p in split_dir.iterdir() if p.is_dir()):
             mp4_by_stem = {p.stem: p for p in task_dir.glob("*.mp4")}
             hdf5_by_stem = {p.stem: p for p in task_dir.glob("*.hdf5")}
-            for stem in sorted(set(mp4_by_stem).intersection(hdf5_by_stem), key=lambda s: int(s) if s.isdigit() else s):
+            for stem in sorted(
+                set(mp4_by_stem).intersection(hdf5_by_stem),
+                key=lambda s: (0, int(s)) if s.isdigit() else (1, s),
+            ):
                 yield split, part_id, task_dir.name, mp4_by_stem[stem], hdf5_by_stem[stem]
 
 

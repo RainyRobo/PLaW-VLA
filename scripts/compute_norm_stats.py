@@ -1,14 +1,10 @@
 # Derived from openpi (Copyright 2024 Physical Intelligence, Inc.; Apache-2.0).
 # Modified for PLaW-VLA by the PLaW-VLA authors, 2026.
-"""Compute normalization statistics for a config.
-
-This script is used to compute the normalization statistics for a given config. It
-will compute the mean and standard deviation of the data in the dataset and save it
-to the config assets directory.
-"""
+"""Compute state/action normalization statistics and save them with the training assets."""
 
 import dataclasses
 import numpy as np
+import torch
 import tqdm
 import tyro
 
@@ -44,11 +40,6 @@ def _dataset_label(data_config: _config.DataConfig) -> str:
     if isinstance(data_config.asset_id, str) and data_config.asset_id:
         return data_config.asset_id
     return "<unknown-dataset>"
-
-
-def _loader_label(data_config: _config.DataConfig) -> str:
-    del data_config
-    return "torch"
 
 
 def _format_count(value: int) -> str:
@@ -98,9 +89,11 @@ def create_torch_dataloader(
     model_config: _model.BaseModelConfig,
     num_workers: int,
     max_frames: int | None = None,
-) -> tuple[_data_loader.Dataset, int]:
+) -> tuple[_data_loader.TorchDataLoader, int]:
     if data_config.repo_id is None:
         raise ValueError("Data config must have a repo_id")
+    if batch_size <= 0 or (max_frames is not None and max_frames <= 0):
+        raise ValueError("batch_size and max_frames must be positive")
     dataset = _data_loader.create_torch_dataset(
         data_config,
         action_horizon,
@@ -122,21 +115,22 @@ def create_torch_dataloader(
             RemoveStrings(),
         ],
     )
+    if len(dataset) == 0:
+        raise ValueError(f"Dataset {data_config.repo_id} has no frames")
     if max_frames is not None and max_frames < len(dataset):
-        num_batches = max_frames // batch_size
-        shuffle = True
-    else:
-        num_batches = len(dataset) // batch_size
-        shuffle = False
+        indices = np.random.default_rng(0).choice(len(dataset), size=max_frames, replace=False)
+        dataset = torch.utils.data.Subset(dataset, indices.tolist())
+    batch_size = min(batch_size, len(dataset))
+    num_batches = (len(dataset) + batch_size - 1) // batch_size
     # Keep the scan on CPU. The loader's default JAX mesh shards each batch
     # across every visible device and rejects sizes that do not divide that count.
     data_loader = _data_loader.TorchDataLoader(
         dataset,
         local_batch_size=batch_size,
         num_workers=num_workers,
-        shuffle=shuffle,
         num_batches=num_batches,
         framework="pytorch",
+        drop_last=False,
     )
     return data_loader, num_batches
 
@@ -154,8 +148,7 @@ def compute_dataset_norm_stats(
     show_progress: bool,
 ) -> None:
     dataset_name = _dataset_label(data_config)
-    loader_name = _loader_label(data_config)
-    tqdm.tqdm.write(f"[{dataset_index}/{total_datasets}] Preparing {dataset_name} with {loader_name} loader")
+    tqdm.tqdm.write(f"[{dataset_index}/{total_datasets}] Preparing {dataset_name} with torch loader")
 
     data_loader, num_batches = create_torch_dataloader(
         data_config,
@@ -168,10 +161,10 @@ def compute_dataset_norm_stats(
 
     keys = ["state", "actions"]
     stats = {key: normalize.RunningStats() for key in keys}
-    expected_frames = num_batches * batch_size
+    expected_frames = len(data_loader.torch_loader.dataset)
     tqdm.tqdm.write(
         f"[{dataset_index}/{total_datasets}] Scanning {_format_count(num_batches)} batch(es)"
-        f" (~{_format_count(expected_frames)} frame(s)) for {dataset_name}"
+        f" ({_format_count(expected_frames)} frame(s)) for {dataset_name}"
     )
 
     processed_frames = 0

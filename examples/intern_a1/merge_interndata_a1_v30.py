@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import dataclasses
 import json
-import os
 from pathlib import Path
 import sys
 import warnings
@@ -33,8 +32,8 @@ def _ensure_import_paths() -> None:
 
 _ensure_import_paths()
 
-from openpi.datasets.common import progress as progress_display
-from openpi.datasets.specs import intern_a1_v30
+from openpi.datasets.common import progress as progress_display  # noqa: E402
+from openpi.datasets.specs import intern_a1_v30  # noqa: E402
 
 CONSOLE = progress_display.get_console()
 
@@ -66,7 +65,10 @@ def main(args: Args) -> None:
     if not grouped:
         raise FileNotFoundError(f"No extracted InternData-A1 task-level v3 datasets found under {args.input_root}.")
 
+    input_root = args.input_root.expanduser().resolve()
     output_root = args.output_dir.expanduser().resolve()
+    if output_root == input_root or output_root in input_root.parents:
+        raise ValueError("Output directory must not be the input directory or an ancestor of it.")
     output_root.mkdir(parents=True, exist_ok=True)
     summaries: list[dict[str, object]] = []
     with progress_display.create_progress(console=CONSOLE) as progress:

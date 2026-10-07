@@ -5,7 +5,6 @@ import http
 import logging
 import time
 import traceback
-import torch
 
 from openpi_client import base_policy as _base_policy
 from openpi_client import msgpack_numpy

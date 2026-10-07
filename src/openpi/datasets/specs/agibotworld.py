@@ -167,45 +167,6 @@ def _to_jsonable(obj: Any) -> Any:
     return obj
 
 
-def _replace_legacy_hf_list_markers(obj: Any) -> Any:
-    """Recursively rewrite HuggingFace feature metadata from List -> Sequence."""
-    if isinstance(obj, dict):
-        out = {}
-        for key, value in obj.items():
-            if key == "_type" and value == "List":
-                out[key] = "Sequence"
-            else:
-                out[key] = _replace_legacy_hf_list_markers(value)
-        return out
-    if isinstance(obj, list):
-        return [_replace_legacy_hf_list_markers(v) for v in obj]
-    return obj
-
-
-def _rewrite_parquet_hf_metadata(parquet_path: Path) -> None:
-    """Normalize parquet HuggingFace schema metadata for modern `datasets`.
-
-    LeRobot 0.1.0 writes fixed-length sequences with legacy `"_type": "List"`
-    markers in the embedded HuggingFace metadata. `datasets>=3.x` expects
-    `Sequence` instead and rejects these files during `load_dataset("parquet")`.
-    """
-    schema = pq.read_schema(parquet_path)
-    metadata = dict(schema.metadata or {})
-    hf_metadata = metadata.get(b"huggingface")
-    if not hf_metadata:
-        return
-
-    parsed = json.loads(hf_metadata.decode("utf-8"))
-    rewritten = _replace_legacy_hf_list_markers(parsed)
-    if rewritten == parsed:
-        return
-
-    table = pq.read_table(parquet_path)
-    metadata[b"huggingface"] = json.dumps(rewritten, separators=(",", ":")).encode("utf-8")
-    table = table.replace_schema_metadata(metadata)
-    pq.write_table(table, parquet_path)
-
-
 class RunningNormStats:
     def __init__(self) -> None:
         self._count = 0

@@ -4,12 +4,10 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
 import dataclasses
 import json
 import os
 from pathlib import Path
-import shutil
 import sys
 from typing import Any
 
@@ -51,7 +49,6 @@ CONSOLE = progress_display.get_console()
 class Args:
     output_dir: Path
     data_dir: Path = Path("data/raw/egodex")
-    staging_root: Path | None = None
     repo_name: str = convert_egodex.REPO_NAME
     ray_temp_root: Path | None = None
     cleanup_tmp_on_success: bool = False
@@ -69,7 +66,6 @@ class Args:
     conversion_num_workers: int | None = None
     episode_commit_batch_size: int | None = None
     max_inflight_episodes: int | None = None
-    video_link_mode: convert_egodex.MergeLinkMode = "copy"
     push_to_hub: bool = False
     hub_owner: str | None = None
     summary_json: Path | None = None
@@ -150,12 +146,9 @@ def main(args: Args) -> None:
 
     data_root = convert_egodex.resolve_data_root(args.data_dir.expanduser().resolve())
     output_root = args.output_dir.expanduser().resolve()
-    if args.staging_root is not None:
-        CONSOLE.print("[yellow]Ignoring --staging-root: shard mode writes directly to --output-dir.")
-    if args.video_link_mode != "copy":
-        CONSOLE.print("[yellow]Ignoring --video-link-mode: conversion now always writes real shard files.")
+    if output_root == data_root or output_root in data_root.parents:
+        raise ValueError("Output directory must not be the input directory or an ancestor of it.")
     build_root = output_root
-    using_staging = False
     ray_temp_dir = ray_runtime.resolve_ray_temp_dir(
         label="egodex-v3",
         unique_key=str(build_root),
@@ -323,7 +316,6 @@ def main(args: Args) -> None:
             [
                 ("Data Root", data_root),
                 ("Output Dir", output_root),
-                ("Build Root", build_root if using_staging else "in-place"),
                 ("Selected Tasks", len(selected_task_names)),
                 ("Selected Episodes", len(episode_jobs)),
                 ("Keep Extra Fields", args.keep_extra_fields),
@@ -403,7 +395,7 @@ def main(args: Args) -> None:
             convert_egodex.save_prepared_episode_batch(
                 dataset,
                 payload_batch,
-                link_mode=args.video_link_mode,
+                link_mode="copy",
                 on_episode_saved=_on_episode_saved,
             )
             _persist_saved_payloads(saved_payloads)
@@ -429,7 +421,7 @@ def main(args: Args) -> None:
                 convert_egodex.save_prepared_episode_batch(
                     dataset,
                     [payload],
-                    link_mode=args.video_link_mode,
+                    link_mode="copy",
                     on_episode_saved=lambda _offset, episode_index, payload=payload: single_saved_payloads.append(
                         (payload, episode_index)
                     ),

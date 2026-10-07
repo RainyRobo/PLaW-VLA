@@ -8,6 +8,7 @@ third_party
 checkpoints
 data
 results
+policy_records
 logs
 wandb
 assets/*/

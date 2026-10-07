@@ -328,50 +328,6 @@ def infer_layout_from_info(info: dict, *, dataset_dir: Path | None = None) -> In
     raise ValueError(f"Unsupported InternData-A1 schema with features: {sorted(features)}")
 
 
-def _replace_legacy_hf_list_markers(obj: Any) -> Any:
-    if isinstance(obj, dict):
-        out = {}
-        for key, value in obj.items():
-            out[key] = "Sequence" if key == "_type" and value == "List" else _replace_legacy_hf_list_markers(value)
-        return out
-    if isinstance(obj, list):
-        return [_replace_legacy_hf_list_markers(value) for value in obj]
-    return obj
-
-
-def _rewrite_parquet_hf_metadata(parquet_path: Path) -> None:
-    schema = pq.read_schema(parquet_path)
-    metadata = dict(schema.metadata or {})
-    hf_metadata = metadata.get(b"huggingface")
-    if hf_metadata is None:
-        return
-
-    parsed = json.loads(hf_metadata.decode("utf-8"))
-    rewritten = _replace_legacy_hf_list_markers(parsed)
-    if rewritten == parsed:
-        return
-
-    table = pq.read_table(parquet_path)
-    metadata[b"huggingface"] = json.dumps(rewritten, separators=(",", ":")).encode("utf-8")
-    table = table.replace_schema_metadata(metadata)
-    pq.write_table(table, parquet_path)
-
-
-def _rewrite_hf_arrow_metadata(table: Any) -> Any:
-    metadata = dict(table.schema.metadata or {})
-    hf_metadata = metadata.get(b"huggingface")
-    if hf_metadata is None:
-        return table
-
-    parsed = json.loads(hf_metadata.decode("utf-8"))
-    rewritten = _replace_legacy_hf_list_markers(parsed)
-    if rewritten == parsed:
-        return table
-
-    metadata[b"huggingface"] = json.dumps(rewritten, separators=(",", ":")).encode("utf-8")
-    return table.replace_schema_metadata(metadata)
-
-
 def _column_to_vector(column: Any) -> np.ndarray:
     values = column_to_numpy(column)
     if values.dtype == object:

@@ -21,7 +21,7 @@ from openpi.models_pytorch.world_model_pytorch import (
 def get_safe_dtype(target_dtype, device_type):
     """Get a safe dtype for the given device type."""
     if device_type == "cpu":
-        # CPU doesn't support bfloat16, use float32 instead
+        # Use float32 for portable CPU positional-embedding computation.
         if target_dtype == torch.bfloat16:
             return torch.float32
         if target_dtype == torch.float64:
@@ -30,7 +30,7 @@ def get_safe_dtype(target_dtype, device_type):
 
 
 def create_sinusoidal_pos_embedding(
-    time: torch.tensor, dimension: int, min_period: float, max_period: float, device="cpu"
+    time: Tensor, dimension: int, min_period: float, max_period: float, device: torch.device | str = "cpu"
 ) -> Tensor:
     """Computes sine-cosine positional embedding vectors for scalar positions."""
     if dimension % 2 != 0:
@@ -39,6 +39,7 @@ def create_sinusoidal_pos_embedding(
     if time.ndim != 1:
         raise ValueError("The time tensor is expected to be of shape `(batch_size, )`.")
 
+    device = torch.device(device)
     dtype = get_safe_dtype(torch.float64, device.type)
     fraction = torch.linspace(0.0, 1.0, dimension // 2, dtype=dtype, device=device)
     period = min_period * (max_period / min_period) ** fraction
@@ -221,6 +222,15 @@ def _zero_last_step_collapse_metrics(device: torch.device) -> dict[str, Tensor]:
 class PI0Pytorch(nn.Module):
     def __init__(self, config):
         super().__init__()
+        msg = "Transformers patch is missing or incompatible. Run `bash scripts/install_transformers_patch.sh`."
+        try:
+            from transformers.models.siglip import check
+
+            if not check.check_whether_transformers_replace_is_installed_correctly():
+                raise ValueError(msg)
+        except ImportError:
+            raise ValueError(msg) from None
+
         self.config = config
         self.pi05 = config.pi05
         self.training_stage = config.training_stage
@@ -340,20 +350,6 @@ class PI0Pytorch(nn.Module):
         # Training stage setup
         self.set_training_stage(self.training_stage)
         self.print_trainable_parameters_auto()
-
-        msg = (
-            "transformers_replace is not installed correctly. "
-            "Install `transformers==5.0.0`, then copy "
-            "`./src/openpi/models_pytorch/transformers_replace/*` into the installed "
-            "`transformers/` package directory."
-        )
-        try:
-            from transformers.models.siglip import check
-
-            if not check.check_whether_transformers_replace_is_installed_correctly():
-                raise ValueError(msg)
-        except ImportError:
-            raise ValueError(msg) from None
 
     def gradient_checkpointing_enable(self, modules: list[str] | None = None):
         """Enable gradient checkpointing for memory optimization.

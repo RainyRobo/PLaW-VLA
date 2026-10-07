@@ -36,7 +36,7 @@ ModelType: TypeAlias = _model.ModelType
 # Work around a tyro issue with using nnx.filterlib.Filter directly.
 Filter: TypeAlias = nnx.filterlib.Filter
 
-_LOCAL_REPO_CHILDREN_MANIFEST = ".openpi_child_datasets_manifest.json"
+_LOCAL_REPO_CHILDREN_MANIFEST = ".child_datasets_manifest.json"
 _LOCAL_REPO_CHILDREN_MANIFEST_VERSION = 1
 
 

@@ -1,5 +1,7 @@
 # Derived from openpi (Copyright 2024 Physical Intelligence, Inc.; Apache-2.0).
 # Modified for PLaW-VLA by the PLaW-VLA authors, 2026.
+# Simulator paths and rendering settings must precede third-party imports.
+# ruff: noqa: E402
 from __future__ import annotations
 
 import collections

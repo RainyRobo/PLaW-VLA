@@ -31,7 +31,7 @@ MUJOCO_GL=egl uv run --project examples/libero --frozen python examples/libero/m
   --task-suite-name libero_spatial --seed 42
 ```
 
-Use `--task-ids 0 1 2` to select tasks, `--num-trials-per-task` to set the trial count, and `--host` / `--port` to connect to another server. Supported suites are `libero_spatial`, `libero_object`, `libero_goal`, and `libero_10`. The client reads camera keys and temporal sampling from server metadata. Videos go to `results/libero/videos`; set `--video-out-path` to change this.
+By default, the client evaluates every task in the selected suite with 50 trials per task. Use `--task-ids 0 1 2` to select tasks, `--num-trials-per-task` to set the trial count, and `--host` / `--port` to connect to another server. Supported suites are `libero_spatial`, `libero_object`, `libero_goal`, and `libero_10`. The client reads camera keys and temporal sampling from server metadata. Failed-rollout videos go to `results/libero/videos`; use `--record-video all|failure|none` to control recording and `--video-out-path` to change the output directory.
 
 For systems using an X display instead of EGL, set `MUJOCO_GL=glx`.
 
@@ -43,7 +43,11 @@ For systems using an X display instead of EGL, set `MUJOCO_GL=glx`.
 CONFIG=stage3_finetuning_libero CHECKPOINT_DIR=/path/to/checkpoint/step \
 SERVER_GPU=0 CLIENT_GPU=1 TASK_SUITES="libero_spatial libero_goal" \
 bash examples/libero/eval.sh serial
+```
 
+The parallel example connects to an already running server at `HOST:PORT`. Select the GPUs available to the simulator clients:
+
+```bash
 HOST=127.0.0.1 PORT=8001 GPU_LIST="0 1" \
 TASK_SUITES="libero_spatial libero_object libero_goal libero_10" \
 bash examples/libero/eval.sh parallel

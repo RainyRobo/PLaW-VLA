@@ -23,16 +23,20 @@ def main(data_dir: Path, output_dir: Path, *, source_fps: int = 20, fps: int = 1
         raise FileExistsError(f"Output already exists: {output_dir}")
     if fps <= 0 or source_fps < fps or source_fps % fps:
         raise ValueError("source_fps must be a positive integer multiple of fps")
+    with h5py.File(files[0], "r") as raw:
+        first_obs = raw["data"][next(iter(raw["data"]))]["obs"]
+        image_shape = tuple(first_obs["agentview_rgb"].shape[1:])
+        wrist_image_shape = tuple(first_obs["eye_in_hand_rgb"].shape[1:])
     names = ["x", "y", "z", "quaternion.w", "quaternion.x", "quaternion.y", "quaternion.z", "gripper.width"]
     features = {
         "observation.images.image": {
             "dtype": "video",
-            "shape": (256, 256, 3),
+            "shape": image_shape,
             "names": ["height", "width", "channels"],
         },
         "observation.images.wrist_image": {
             "dtype": "video",
-            "shape": (256, 256, 3),
+            "shape": wrist_image_shape,
             "names": ["height", "width", "channels"],
         },
         "observation.state": {"dtype": "float32", "shape": (8,), "names": names},

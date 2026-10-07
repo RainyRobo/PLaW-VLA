@@ -27,7 +27,7 @@ import pathlib
 import numpy as np
 import tyro
 
-REPO_NAME = "your_hf_username/libero"
+REPO_NAME = "local/libero"
 RAW_DATASET_NAMES = [
     "libero_10_no_noops",
     "libero_goal_no_noops",
@@ -66,7 +66,7 @@ def _language_instruction(value) -> str:
     return str(value)
 
 
-def convert_libero(data_dir: str, output_dir: pathlib.Path, *, push_to_hub: bool) -> pathlib.Path:
+def convert_libero(data_dir: str, output_dir: pathlib.Path) -> pathlib.Path:
     """Write one LeRobot dataset from the raw LIBERO RLDS splits in ``data_dir``."""
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
     import tensorflow_datasets as tfds
@@ -103,16 +103,14 @@ def convert_libero(data_dir: str, output_dir: pathlib.Path, *, push_to_hub: bool
     dataset.stop_image_writer()
     dataset.finalize()
 
-    if push_to_hub:
-        raise ValueError("Publishing converted datasets requires separately verified source-data licensing.")
     return output_dir
 
 
-def main(data_dir: str, output_dir: pathlib.Path | None = None, *, push_to_hub: bool = False) -> None:
+def main(data_dir: str, output_dir: pathlib.Path | None = None) -> None:
     from lerobot.datasets.lerobot_dataset import HF_LEROBOT_HOME
 
     destination = output_dir if output_dir is not None else HF_LEROBOT_HOME / REPO_NAME
-    written = convert_libero(data_dir, pathlib.Path(destination), push_to_hub=push_to_hub)
+    written = convert_libero(data_dir, pathlib.Path(destination))
     print(f"Wrote LeRobot dataset to {written}")
 
 
