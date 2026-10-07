@@ -111,7 +111,7 @@ def _resolve_conversion_workers(requested: int | None, job_count: int) -> int:
 
 
 def _resolve_ray_prepare_cpus() -> float:
-    raw = os.environ.get("OPENPI_RAY_PREPARE_CPUS", "0.5")
+    raw = os.environ.get("RAY_PREPARE_CPUS", "0.5")
     try:
         value = float(raw)
     except ValueError:
@@ -699,7 +699,7 @@ def _repair_agibot_resume_output_if_needed(
             "Re-run with the same task filters used for the original conversion."
         )
     info = json.loads((output_root / "meta" / "info.json").read_text(encoding="utf-8"))
-    checkpoint = EpisodeCheckpointStore(output_root, namespace="openpi_agibot")
+    checkpoint = EpisodeCheckpointStore(output_root, namespace="agibot")
     completed_records = checkpoint.load_completed_records()
 
     extra_data_paths = _delete_numbered_files_after(
@@ -907,7 +907,7 @@ def _build_embodiment_dataset(job: dict[str, Any], *, workers: int) -> dict[str,
                 robot_type="a2d",
                 features=dict(job["features"]),
             )
-        checkpoint = EpisodeCheckpointStore(output_root, namespace="openpi_agibot")
+        checkpoint = EpisodeCheckpointStore(output_root, namespace="agibot")
         completed_keys = checkpoint.load_completed()
         episode_jobs = [job_item for job_item in episode_jobs if str(job_item["source_episode_key"]) not in completed_keys]
         for next_job_index, job_item in enumerate(episode_jobs):

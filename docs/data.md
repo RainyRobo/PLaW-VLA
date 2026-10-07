@@ -45,27 +45,37 @@ uv run --project examples/agibotworld --frozen python examples/agibotworld/conve
   --src-path data/raw/agibotworld --output-dir data/pretrain/agibotworld
 ```
 
-The converter discovers the available gripper and dexterous-hand tasks, groups outputs by effector, and writes canonical cameras and state/action features. `--task-ids`, `--episodes-per-task`, and `--max-tasks` select local subsets. The raw format is recorded at its source frame rate; the training loader applies time-based sampling.
+The converter discovers gripper and dexterous-hand tasks, groups outputs by effector, and writes shared camera names with each effector's state/action layout recorded in metadata. `--task-ids`, `--episodes-per-task`, and `--max-tasks` select local subsets. The raw format is recorded at its source frame rate; the training loader applies time-based sampling.
 
 ## RoboTwin EEF datasets and format upgrades
 
 ```bash
-uv sync --project examples/lerobot_v21_to_v30 --python 3.12 --frozen
-uv run --project examples/lerobot_v21_to_v30 --frozen python examples/lerobot_v21_to_v30/convert_robotwin_to_lerobot.py \
+uv sync --project scripts/data --python 3.12 --frozen
+uv run --project scripts/data --frozen python scripts/data/convert_robotwin_to_lerobot.py \
   --input-roots data/raw/robotwin/clean data/raw/robotwin/aug \
   --output-dir data/pretrain/robotwin
 ```
 
 Each input root contains task-level v2.1 EEF datasets. The outputs are grouped by embodiment, with bimanual 16D layouts ordered as `left [xyz, qw, qx, qy, qz, gripper]`, then `right [xyz, qw, qx, qy, qz, gripper]`. Confirm the source export has this quaternion and gripper convention before conversion; format upgrades do not change action semantics automatically.
 
-Generic upgrades use `convert_lerobot_v21_to_v30.py --input-root ... --output-dir ...` or `convert_lerobot_v20_to_v30.py --input-root ... --output-dir ...` in the same environment. Use `--help` for explicit column/vector remapping. Choose a new output directory unless you intend to replace an existing conversion.
+General LeRobot format upgrades live in [`scripts/data`](../scripts/data). Run either command in the same environment:
+
+```bash
+uv run --project scripts/data --frozen python scripts/data/convert_lerobot_v21_to_v30.py \
+  --input-root data/raw/lerobot_v21 --output-dir data/converted/lerobot_v3
+uv run --project scripts/data --frozen python scripts/data/convert_lerobot_v20_to_v30.py \
+  --input-root data/raw/lerobot_v20 --output-dir data/converted/lerobot_v3_from_v20
+```
+
+Use `--help` for explicit column/vector remapping. Choose a new output directory unless you intend to replace an existing conversion.
 
 ## LIBERO
 
-Use the v3 converter environment, which includes HDF5 support:
+Install the shared converter environment, which includes HDF5 support:
 
 ```bash
-uv run --project examples/lerobot_v21_to_v30 --frozen python examples/libero/convert_libero_to_lerobot.py \
+uv sync --project scripts/data --python 3.12 --frozen
+uv run --project scripts/data --frozen python examples/libero/convert_libero_to_lerobot.py \
   --data-dir data/raw/libero --output-dir data/pretrain/libero
 ```
 
@@ -78,13 +88,13 @@ The default converts 20 Hz demonstrations to 10 Hz. It writes 8D absolute EEF st
 ```bash
 uv sync --project examples/egodex --python 3.12 --frozen
 uv run --project examples/egodex --frozen python examples/egodex/convert_egodex_to_lerobot.py \
-  --data-dir data/raw/egodex --output-dir data/pretrain/egodex
+  --data-dir data/raw/egodex --output-dir data/pretrain/egodex --subdirs part1
 ```
 
-Select source splits with `--subdirs` and tasks with `--task-names`. EgoDex is action-free input for Stage I. Its data terms restrict commercial use and sharing adaptations; keep converted output local unless you have the required rights.
+List the downloaded training splits with `--subdirs part1 part2 ...` and select tasks with `--task-names`. Without `--subdirs`, all available splits are scanned, including test data if present. EgoDex is action-free input for Stage I. Its data terms restrict commercial use and sharing adaptations; keep converted output local unless you have the required rights.
 
 ## Output and training statistics
 
-A LeRobot v3 dataset contains `meta/info.json`, task/episode metadata, `data/` Parquet shards, and `videos/` camera shards. Grouped source roots contain one such dataset per embodiment/effector. State, action, and image feature names are recorded in `meta/info.json`; the source adapters validate layouts before mixing them.
+A LeRobot v3 dataset contains `meta/info.json`, task/episode metadata, and `data/` Parquet shards. Camera data is written to `videos/` shards; the v2.0 format upgrade retains source images inline. Grouped source roots contain one dataset per embodiment/effector. State, action, and image feature names are recorded in `meta/info.json`; the source adapters validate layouts before mixing them.
 
 Conversion and merge commands support selected subsets and, where listed in `--help`, `--resume` or explicit `--overwrite`. Preserve source frame rates and episode boundaries. Point `DATA_ROOT` at the parent of the five converted source directories, then compute [training normalization statistics](norm_stats.md) before [Stage II](pretraining.md).

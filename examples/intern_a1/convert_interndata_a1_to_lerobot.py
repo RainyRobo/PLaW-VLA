@@ -94,7 +94,7 @@ def _resolve_workers(requested: int | None, job_count: int) -> int:
 
 
 def _resolve_ray_prepare_cpus() -> float:
-    raw = os.environ.get("OPENPI_RAY_PREPARE_CPUS", "0.5")
+    raw = os.environ.get("RAY_PREPARE_CPUS", "0.5")
     try:
         value = float(raw)
     except ValueError:
@@ -266,7 +266,7 @@ def _build_embodiment_dataset(job: dict[str, Any], *, workers: int) -> dict[str,
             features=convert_inner._build_output_features(first_info, first_layout),
         )
 
-    checkpoint = EpisodeCheckpointStore(output_dir, namespace="openpi_intern_a1")
+    checkpoint = EpisodeCheckpointStore(output_dir, namespace="intern_a1")
 
     total_selected_episodes = _count_selected_episodes(dataset_dirs, max_episodes_per_dataset)
     commit_batch_size = convert_inner.resolve_episode_commit_batch_size(

@@ -16,6 +16,15 @@ Derived code:
   these implementations; their source references and notices are retained.
 - LeRobot: Copyright Hugging Face contributors; Apache-2.0.
   Dataset conversion helpers adapt the LeRobot dataset format and writer.
+  The dataset writer includes portions marked
+  Copyright 2024 The HuggingFace Inc. team. All rights reserved.
+  The format migration implementation includes portions marked
+  Copyright 2025 The HuggingFace Inc. team. All rights reserved.
+- Any4LeRobot: Copyright (c) 2025 Qizhi Chen; MIT.
+  AgiBot loading/configuration and dataset writer adaptations are derived
+  in part from https://github.com/Tavish9/any4lerobot.
+  See LICENSES/MIT-Any4LeRobot.txt for the complete license.
+  LeRobot-derived format migration portions retain their Apache-2.0 license.
 - LingBot-VLA: Copyright 2026 Robbyant Team; Apache-2.0.
   RoboTwin evaluation client portions are adapted from its benchmark integration.
 - RoboTwin: Copyright (c) 2025 Tianxing Chen (陈天行); MIT.

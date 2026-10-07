@@ -1,7 +1,7 @@
 [project]
-name = "lerobot-v21-to-v30"
+name = "data-converters"
 version = "0.1.0"
-description = "Standalone LeRobot v2.1 to v3.0 dataset upgrade tools"
+description = "Local dataset conversion and LeRobot format upgrade tools"
 requires-python = ">=3.12"
 dependencies = [
     "datasets>=4.0.0,<5.0.0",

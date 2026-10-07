@@ -6,12 +6,11 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import as_completed
 from dataclasses import dataclass
-from pathlib import Path
 import json
+from pathlib import Path
 import shutil
+from typing import Any, Callable
 import warnings
-from typing import Any
-from typing import Callable
 
 import datasets
 from lerobot.datasets.compute_stats import aggregate_stats
@@ -788,7 +787,7 @@ def _write_sharded_video_files(
 
     per_episode: dict[int, dict[str, Any]] = {}
     max_workers = max(1, min(worker_threads or len(video_keys), len(video_keys), 8))
-    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="openpi-v30-video") as executor:
+    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="dataset-v30-video") as executor:
         futures = {
             executor.submit(
                 _write_sharded_video_key_files,

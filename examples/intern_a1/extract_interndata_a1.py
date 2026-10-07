@@ -112,7 +112,7 @@ def _format_rate(num_bytes: int, elapsed_s: float) -> str:
 
 
 def _archive_cache_dir(output_root: Path) -> Path:
-    return output_root / ".openpi_archive_cache"
+    return output_root / ".archive_cache"
 
 
 def _archive_cache_path(archive_path: Path, output_root: Path) -> Path:

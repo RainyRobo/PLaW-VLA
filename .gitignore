@@ -1,6 +1,6 @@
 # Local training artifacts.
 checkpoints/
-data/
+/data/
 wandb/
 logs/
 debug/

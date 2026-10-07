@@ -118,6 +118,7 @@ def _write_assets_manifest(
         manifest_datasets.append(
             {
                 "index": index,
+                "source_group": metadata.get("source_group", index),
                 "dataset_type": metadata.get("dataset_type"),
                 "repo_id": _json_compatible(metadata.get("repo_id", data_config.repo_id)),
                 "asset_id": _json_compatible(metadata.get("asset_id", data_config.asset_id)),

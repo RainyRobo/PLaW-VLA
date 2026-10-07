@@ -76,7 +76,7 @@ class OrderedAsyncBatchCommitter(Generic[T]):
         self._commit_fn = commit_fn
         self._on_batch_committed = on_batch_committed
         self._max_pending_batches = max(1, max_pending_batches)
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="openpi-commit")
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dataset-commit")
         self._pending_batches: deque[tuple[Future[None], list[T]]] = deque()
 
     def __enter__(self) -> OrderedAsyncBatchCommitter[T]:

@@ -1,12 +1,27 @@
 # Copyright 2026 PLaW-VLA authors. SPDX-License-Identifier: Apache-2.0
 # LeRobot-derived writer portions: Copyright Hugging Face contributors (Apache-2.0).
+# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
+# Adapted from LeRobot format migration tools distributed through Any4LeRobot.
 # Modified for PLaW-VLA; see NOTICE.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 from __future__ import annotations
 
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from dataclasses import field
 import math
 from pathlib import Path
 import shutil
@@ -197,7 +212,7 @@ def _write_episode_rows(
 
     cache_root = staging.default_staging_base() / "hf-datasets"
     cache_root.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="openpi-hf-datasets-", dir=cache_root) as cache_dir:
+    with tempfile.TemporaryDirectory(prefix="dataset-hf-", dir=cache_root) as cache_dir:
         write_episodes(Dataset.from_generator(_rows, cache_dir=cache_dir), out_root)
     write_stats(aggregate_stats(episode_stats), out_root)
 
@@ -677,7 +692,7 @@ def _write_sharded_video_files(
         return per_episode
 
     max_workers = max(1, min(worker_threads or len(video_keys), len(video_keys), 8))
-    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="openpi-v21-video") as executor:
+    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="dataset-v21-video") as executor:
         futures = {
             executor.submit(
                 _write_sharded_video_key_files,

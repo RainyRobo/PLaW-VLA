@@ -142,7 +142,7 @@ packages = ["src/openpi"]
 "LICENSE_GEMMA.txt" = "openpi/LICENSE_GEMMA.txt"
 
 [tool.hatch.build.targets.sdist]
-exclude = ["third_party", "checkpoints", "data", "results", "logs", "wandb", ".venv"]
+exclude = ["third_party", "checkpoints", "/data", "results", "logs", "wandb", ".venv"]
 
 [tool.pytest.ini_options]
 markers = ["manual: should be run manually."]

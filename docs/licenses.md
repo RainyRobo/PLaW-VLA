@@ -2,7 +2,9 @@
 
 ## Repository code
 
-PLaW-VLA's own code is under [Apache-2.0](../LICENSE). [NOTICE](../NOTICE) records upstream attributions and modified code. openpi, Big Vision, Transformers, DINO/DINOv2-derived positional interpolation, LeRobot-derived writer code, and LingBot-VLA-derived client portions retain their Apache-2.0 notices. Meta V-JEPA 2 and RoboTwin-derived portions retain MIT notices in [LICENSES](../LICENSES). The client serializer contains BSD-3-Clause msgpack-numpy code with its full copyright notice and license.
+PLaW-VLA's own code is under [Apache-2.0](../LICENSE). [NOTICE](../NOTICE) records upstream attributions and modified code. openpi, Big Vision, Transformers, DINO/DINOv2-derived positional interpolation, LeRobot-derived writer and format migration code, and LingBot-VLA-derived client portions retain their Apache-2.0 notices.
+
+AgiBot loading/configuration and dataset writer portions adapted from [Any4LeRobot](https://github.com/Tavish9/any4lerobot) retain its [MIT license](../LICENSES/MIT-Any4LeRobot.txt), including Copyright (c) 2025 Qizhi Chen. LeRobot-derived format migration code used through Any4LeRobot retains its Apache-2.0 notices. Meta V-JEPA 2 and RoboTwin-derived portions retain MIT notices in [LICENSES](../LICENSES). The client serializer contains BSD-3-Clause msgpack-numpy code with its full copyright notice and license.
 
 The `plaw-vla` and `openpi-client` distributions include their applicable licenses and notices. External submodule source, simulation assets, datasets, and downloaded checkpoints are excluded from wheels and source distributions. Installed third-party packages remain under their own licenses.
 

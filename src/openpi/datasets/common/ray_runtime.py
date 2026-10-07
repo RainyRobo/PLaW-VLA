@@ -12,7 +12,7 @@ from typing import Any
 from openpi.datasets.common import staging
 
 _SAFE_RAY_BASE_PATH_LEN = 40
-_REPO_ROOT = Path(__file__).resolve().parents[3]
+_REPO_ROOT = Path(__file__).resolve().parents[4]
 _DEFAULT_PYTHON_PATHS = (_REPO_ROOT, _REPO_ROOT / "src")
 
 
@@ -73,7 +73,7 @@ def resolve_ray_temp_dir(
     root = root.expanduser().resolve()
     digest = hashlib.sha1(unique_key.encode("utf-8"), usedforsecurity=False).hexdigest()[:10]
     label_fragment = _sanitize_fragment(label)[:12]
-    candidate = root / f"openpi-ray-{label_fragment}-{digest}"
+    candidate = root / f"ray-{label_fragment}-{digest}"
 
     if len(candidate.as_posix()) > _SAFE_RAY_BASE_PATH_LEN:
         candidate = root / f"ray-{digest}"

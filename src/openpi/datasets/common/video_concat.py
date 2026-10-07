@@ -3,11 +3,11 @@ from __future__ import annotations
 
 from contextlib import suppress
 import logging
+import os
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
-import os
 
 from lerobot.datasets.video_utils import concatenate_video_files as _lerobot_concatenate_video_files
 
@@ -15,16 +15,16 @@ LOGGER = logging.getLogger(__name__)
 
 
 def _validation_enabled() -> bool:
-    raw = os.environ.get("OPENPI_VALIDATE_CONCAT_VIDEOS", "1").strip().lower()
+    raw = os.environ.get("VALIDATE_CONCAT_VIDEOS", "1").strip().lower()
     return raw not in {"0", "false", "no", "off"}
 
 
 def _validation_tolerance_s() -> float:
-    raw = os.environ.get("OPENPI_CONCAT_VALIDATION_TOLERANCE_S", "30").strip()
+    raw = os.environ.get("CONCAT_VALIDATION_TOLERANCE_S", "30").strip()
     try:
         value = float(raw)
     except ValueError:
-        LOGGER.warning("Invalid OPENPI_CONCAT_VALIDATION_TOLERANCE_S=%r; defaulting to 30s.", raw)
+        LOGGER.warning("Invalid CONCAT_VALIDATION_TOLERANCE_S=%r; defaulting to 30s.", raw)
         value = 30.0
     return max(1.0, value)
 

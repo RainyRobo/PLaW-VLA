@@ -900,7 +900,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "lerobot-v21-to-v30"
+name = "data-converters"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

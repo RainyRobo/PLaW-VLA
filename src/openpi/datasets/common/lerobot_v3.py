@@ -1,5 +1,9 @@
-# Copyright 2026 PLaW-VLA authors. SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 PLaW-VLA authors.
+# SPDX-License-Identifier: Apache-2.0 AND MIT
 # LeRobot-derived writer portions: Copyright Hugging Face contributors (Apache-2.0).
+# Copyright 2024 The HuggingFace Inc. team. All rights reserved.
+# Dataset writer portions adapted from Any4LeRobot.
+# Copyright (c) 2025 Qizhi Chen (MIT).
 # Modified for PLaW-VLA; see NOTICE.
 from __future__ import annotations
 
@@ -482,7 +486,7 @@ class DirectVideoLeRobotDataset(LeRobotDataset):
         if len(dirty_states) == 1:
             self._flush_pending_video_shard(dirty_states[0])
         else:
-            with ThreadPoolExecutor(max_workers=len(dirty_states), thread_name_prefix="openpi-video-flush") as executor:
+            with ThreadPoolExecutor(max_workers=len(dirty_states), thread_name_prefix="dataset-video-flush") as executor:
                 futures = [executor.submit(self._flush_pending_video_shard, pending) for pending in dirty_states]
                 for future in futures:
                     future.result()

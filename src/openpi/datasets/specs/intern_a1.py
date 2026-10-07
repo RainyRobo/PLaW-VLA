@@ -4,8 +4,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Callable
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 import dataclasses
 import errno
 import json
@@ -18,9 +17,9 @@ from typing import Any, Literal
 import warnings
 
 import av
+from lerobot.datasets.video_utils import get_video_duration_in_s
 import numpy as np
 import pyarrow.parquet as pq
-from lerobot.datasets.video_utils import get_video_duration_in_s
 from tqdm import tqdm
 
 from openpi.datasets.common.lerobot_v3 import DirectVideoLeRobotDataset
@@ -708,7 +707,16 @@ def _pack_canonical_vectors(
 def _convert_episode_arrays(table: Any, layout: InternA1Layout) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     left_state = column_to_matrix(table.column(layout.left_state_key))
     left_gripper_state = column_to_matrix(table.column(layout.left_gripper_key))
-    state, state_mask = _pack_canonical_vectors(left_state=left_state, left_gripper=left_gripper_state)
+    right_state = right_gripper_state = None
+    if layout.right_state_key is not None and layout.right_gripper_key is not None:
+        right_state = column_to_matrix(table.column(layout.right_state_key))
+        right_gripper_state = column_to_matrix(table.column(layout.right_gripper_key))
+    state, state_mask = _pack_canonical_vectors(
+        left_state=left_state,
+        left_gripper=left_gripper_state,
+        right_state=right_state,
+        right_gripper=right_gripper_state,
+    )
 
     left_actions = column_to_matrix(table.column(layout.left_action_key))
     left_gripper_actions = column_to_matrix(table.column(layout.left_gripper_action_key))

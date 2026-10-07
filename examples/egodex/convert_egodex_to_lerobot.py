@@ -85,7 +85,7 @@ def _resolve_workers(requested: int | None, job_count: int) -> int:
 
 
 def _resolve_ray_prepare_cpus() -> float:
-    raw = os.environ.get("OPENPI_RAY_PREPARE_CPUS", "0.5")
+    raw = os.environ.get("RAY_PREPARE_CPUS", "0.5")
     try:
         value = float(raw)
     except ValueError:
@@ -280,7 +280,7 @@ def main(args: Args) -> None:
             keep_extra_fields=args.keep_extra_fields,
         )
 
-    checkpoint = EpisodeCheckpointStore(build_root, namespace="openpi_egodex")
+    checkpoint = EpisodeCheckpointStore(build_root, namespace="egodex")
     completed_keys = checkpoint.load_completed()
     if committed_episodes > 0:
         bootstrap_records = [

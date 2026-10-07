@@ -14,7 +14,6 @@ from typing import Any, ClassVar, Literal, Protocol, TypeAlias
 
 import etils.epath as epath
 import flax.nnx as nnx
-import numpy as np
 from typing_extensions import override
 import tyro
 
@@ -411,6 +410,8 @@ class DataConfig:
     # Versioned description of the pre-normalization representation.  Norm
     # stats with a different or missing contract must not be loaded silently.
     normalization_contract: str | None = None
+    # Source groups retain independently validated transforms and statistics for each child.
+    child_configs: tuple["DataConfig", ...] = ()
 
     # Used to adopt the inputs from a dataset specific format to a common format
     # which is expected by the data transforms.
@@ -962,10 +963,10 @@ def _infer_semantics_from_feature_names(names: tuple[str, ...] | None) -> Action
     if not names:
         return None
     normalized = tuple(str(name) for name in names)
-    if any("joint_" in name for name in normalized):
-        return "joint_position"
     if any("effector" in name for name in normalized):
         return "joint_effector_position"
+    if any("joint_" in name for name in normalized):
+        return "joint_position"
     if any("quaternion" in name for name in normalized):
         return "ee_pose"
     return None
@@ -1025,7 +1026,7 @@ def _infer_local_agibot_eef_types(repo_id: str | Sequence[str] | None) -> set[st
         info = _load_local_dataset_info(single_repo_id)
         if info is None:
             continue
-        eef_type = info.get("openpi_agibot_eef_type") or info.get("openpi_embodiment")
+        eef_type = info.get("agibot_eef_type") or info.get("embodiment")
         if isinstance(eef_type, str) and eef_type.strip():
             eef_types.add(eef_type.strip().lower())
     return eef_types
@@ -1033,19 +1034,10 @@ def _infer_local_agibot_eef_types(repo_id: str | Sequence[str] | None) -> set[st
 def _resolve_agibot_eef_type(
     repo_id: str | Sequence[str] | None,
     explicit_eef_type: Literal["gripper", "dexhand"] | None,
-    *,
-    allow_mixed: bool = False,
 ) -> Literal["gripper", "dexhand"]:
     inferred_eef_types = _infer_local_agibot_eef_types(repo_id)
 
     if len(inferred_eef_types) > 1:
-        if allow_mixed and explicit_eef_type is None:
-            logging.info(
-                "Detected mixed AgiBot embodiments %s; using a temporary gripper layout until child datasets "
-                "are specialized per repo.",
-                sorted(inferred_eef_types),
-            )
-            return "gripper"
         raise ValueError(
             f"Mixed AgiBot embodiments are not supported in one training config: {sorted(inferred_eef_types)}"
         )
@@ -1409,7 +1401,8 @@ class LeRobotAgiBotWorldDataConfig(DataConfigFactory):
         base_config = self.create_base_config(assets_dirs, model_config)
         wm_enabled = self._effective_world_model_enabled(model_config)
         wm_config = self._resolve_world_model_config(model_config)
-        eef_type = _resolve_agibot_eef_type(base_config.repo_id, self.eef_type, allow_mixed=True)
+        eef_type = _resolve_agibot_eef_type(base_config.repo_id, self.eef_type)
+        canonicalize_gripper_openness = self.canonicalize_gripper_openness and eef_type == "gripper"
         native_action_dim = _agibot_native_action_dim(
             eef_type,
             canonical_gripper_action_space=self.canonical_gripper_action_space,
@@ -1449,7 +1442,7 @@ class LeRobotAgiBotWorldDataConfig(DataConfigFactory):
                 native_action_dim=native_action_dim,
                 enable_world_model=wm_enabled,
                 image_keys=repacked_image_keys,
-                canonicalize_gripper_openness=self.canonicalize_gripper_openness,
+                canonicalize_gripper_openness=canonicalize_gripper_openness,
                 state_semantics=(
                     "ee_pose"
                     if eef_type == "gripper" and self.canonical_gripper_action_space == "ee_pose"
@@ -1459,7 +1452,7 @@ class LeRobotAgiBotWorldDataConfig(DataConfigFactory):
             outputs=[agibot_policy.AGIBotOutputs(
                 native_action_dim=native_action_dim,
                 pretrain_world_model=self.pretrain_world_model,
-                canonicalize_gripper_openness=self.canonicalize_gripper_openness,
+                canonicalize_gripper_openness=canonicalize_gripper_openness,
                 state_semantics=(
                     "ee_pose"
                     if eef_type == "gripper" and self.canonical_gripper_action_space == "ee_pose"
@@ -1496,22 +1489,6 @@ class LeRobotAgiBotWorldDataConfig(DataConfigFactory):
             model_transforms=model_transforms,
             action_sequence_keys=() if self.pretrain_world_model else self.action_sequence_keys,
         )
-
-    def _load_norm_stats(self, assets_dir: epath.Path, asset_id) -> dict[str, _transforms.NormStats] | None:
-        if asset_id is None:
-            return None
-        if not isinstance(asset_id, list):
-            asset_id = [asset_id]
-        for a_id in asset_id:
-            try:
-                data_assets_dir = str(assets_dir / a_id)
-                norm_stats = _normalize.load(_download.maybe_download(data_assets_dir))
-                logging.info(f"Loaded norm stats from {data_assets_dir}")
-                return norm_stats
-            except FileNotFoundError:
-                continue
-        logging.info("Norm stats not found for any asset_id, skipping.")
-        return None
 
 _AGIBOT_GRIPPER_DELTA_MASK = _transforms.make_bool_mask(14, -6)
 
@@ -1672,48 +1649,139 @@ class MultiDatasetPretrainDataConfig(DataConfigFactory):
         result: list[tuple[DataConfig, float]] = []
         training_stage = self._resolve_training_stage(model_config)
         for spec in self.datasets:
-            factory = self._create_factory_for_spec(spec, training_stage=training_stage)
-            data_config = factory.create(assets_dirs, model_config)
-            descriptor = self._audit_action_space(spec, data_config)
-            self._validate_descriptor_against_local_metadata(
-                dataset_type=spec.dataset_type,
-                repo_id=data_config.repo_id,
-                descriptor=descriptor,
-            )
-            pretrain_flags = [
-                bool(transform.pretrain_world_model)
-                for transform in data_config.data_transforms.inputs
-                if hasattr(transform, "pretrain_world_model")
-            ]
-            descriptor.validate_for_stage(
-                dataset_type=spec.dataset_type,
-                training_stage=training_stage,
-                has_actions=bool(data_config.action_sequence_keys),
-            )
-            if training_stage == "post_training" and any(pretrain_flags):
-                raise ValueError(
-                    f"Dataset type {spec.dataset_type!r} still uses pretrain_world_model semantics during post_training."
+            expanded_repo_id = _expand_local_repo_ids(spec.repo_id)
+            repo_ids = [expanded_repo_id] if isinstance(expanded_repo_id, str) else list(expanded_repo_id or ())
+            if not repo_ids:
+                raise ValueError(f"Dataset group {spec.dataset_type!r} does not contain any datasets.")
+            asset_ids = self.assets.asset_id
+            if isinstance(asset_ids, Sequence) and not isinstance(asset_ids, str) and len(asset_ids) != len(repo_ids):
+                raise ValueError(f"Dataset group {spec.dataset_type!r} must have one asset ID per child dataset.")
+            children = []
+            for index, repo_id in enumerate(repo_ids):
+                child_assets = dataclasses.replace(
+                    self.assets,
+                    asset_id=asset_ids[index]
+                    if isinstance(asset_ids, Sequence) and not isinstance(asset_ids, str)
+                    else asset_ids,
                 )
-            data_config = dataclasses.replace(
-                data_config,
-                dataset_type=spec.dataset_type,
-                action_space_descriptor=descriptor,
-            )
-            if training_stage == "post_training" and self.use_canonical_delta_actions:
-                data_config = self._apply_shared_delta_transform(
-                    data_config,
-                    dataset_type=spec.dataset_type,
-                    descriptor=descriptor,
+                child_spec = dataclasses.replace(spec, repo_id=repo_id)
+                children.append(
+                    self._create_child_config(child_spec, child_assets, assets_dirs, model_config, training_stage)
+                )
+            if len(children) == 1:
+                data_config = children[0]
+            else:
+                data_config = dataclasses.replace(
+                    children[0],
+                    repo_id=tuple(child.repo_id for child in children),
+                    asset_id=tuple(child.asset_id for child in children),
+                    norm_stats=None,
+                    per_repo_norm_stats={
+                        child.repo_id: child.norm_stats for child in children if child.norm_stats is not None
+                    }
+                    or None,
+                    action_space_descriptor=None,
+                    normalization_contract=None,
+                    child_configs=tuple(children),
                 )
             result.append((data_config, spec.weight))
-            repo_summary = data_config.repo_id
-            if isinstance(repo_summary, Sequence) and not isinstance(repo_summary, str):
-                repo_summary = f"{len(repo_summary)} child datasets (first: {repo_summary[0]})" if repo_summary else "0 child datasets"
             logging.info(
-                f"MultiDatasetPretrain: stage={training_stage}, type={spec.dataset_type}, "
-                f"repo_id={repo_summary}, weight={spec.weight}"
+                "MultiDatasetPretrain: stage=%s, type=%s, children=%d, weight=%s",
+                training_stage,
+                spec.dataset_type,
+                len(children),
+                spec.weight,
             )
         return result
+
+    def _create_child_config(
+        self,
+        spec: MultiDatasetPretrainDatasetSpec,
+        assets: AssetsConfig,
+        assets_dirs: pathlib.Path,
+        model_config: _model.BaseModelConfig,
+        training_stage: Literal["wm_alignment", "post_training"],
+    ) -> DataConfig:
+        factory = dataclasses.replace(self._create_factory_for_spec(spec, training_stage=training_stage), assets=assets)
+        data_config = factory.create(assets_dirs, model_config)
+        descriptor = self._audit_action_space(spec, data_config)
+        self._validate_descriptor_against_local_metadata(
+            dataset_type=spec.dataset_type,
+            repo_id=data_config.repo_id,
+            descriptor=descriptor,
+        )
+        pretrain_flags = [
+            bool(transform.pretrain_world_model)
+            for transform in data_config.data_transforms.inputs
+            if hasattr(transform, "pretrain_world_model")
+        ]
+        descriptor.validate_for_stage(
+            dataset_type=spec.dataset_type,
+            training_stage=training_stage,
+            has_actions=bool(data_config.action_sequence_keys),
+        )
+        if training_stage == "post_training" and any(pretrain_flags):
+            raise ValueError(
+                f"Dataset type {spec.dataset_type!r} uses pretrain_world_model semantics during post_training."
+            )
+        data_config = dataclasses.replace(
+            data_config, dataset_type=spec.dataset_type, action_space_descriptor=descriptor
+        )
+        use_delta = training_stage == "post_training" and self.use_canonical_delta_actions
+        if use_delta:
+            data_config = self._apply_shared_delta_transform(
+                data_config, dataset_type=spec.dataset_type, descriptor=descriptor
+            )
+        contract = data_config.normalization_contract or self._normalization_contract(
+            data_config, descriptor, model_config.action_dim, use_delta
+        )
+        data_config = dataclasses.replace(data_config, normalization_contract=contract)
+        if self.load_norm_stats and data_config.norm_stats is not None:
+            if not isinstance(data_config.asset_id, str):
+                raise ValueError(f"Expected one asset ID for child dataset {data_config.repo_id!r}.")
+            stats_dir = epath.Path(assets.assets_dir or assets_dirs) / normalize_asset_id(data_config.asset_id)
+            _normalize.validate_contract(_download.maybe_download(str(stats_dir)), contract)
+        return data_config
+
+    def _normalization_contract(
+        self,
+        data_config: DataConfig,
+        descriptor: ActionSpaceDescriptor,
+        model_action_dim: int,
+        use_delta: bool,
+    ) -> str:
+        policy = data_config.data_transforms.inputs[0]
+        policy_options = {
+            name: getattr(policy, name)
+            for name in ("adapt_to_pi", "canonicalize_gripper_openness", "state_semantics")
+            if hasattr(policy, name)
+        }
+        for name in ("state_mask", "action_mask"):
+            mask = getattr(policy, name, None)
+            if mask is not None:
+                policy_options[name] = [bool(value) for value in mask]
+        return "pretraining_v1:" + json.dumps(
+            {
+                "dataset_type": data_config.dataset_type,
+                "canonical_space": descriptor.canonical_space_id,
+                "state_dim": descriptor.state_dim,
+                "action_dim": descriptor.action_dim,
+                "model_action_dim": model_action_dim,
+                "state_semantics": descriptor.state_semantics,
+                "action_semantics": descriptor.action_semantics,
+                "action_representation": (
+                    "none"
+                    if not data_config.action_sequence_keys
+                    else "delta_from_current_state"
+                    if use_delta
+                    else "absolute"
+                ),
+                "delta_mask": descriptor.state_action_alignment_mask if use_delta else None,
+                "policy_options": policy_options,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
 
     _DEFAULT_IMAGE_KEYS: ClassVar[dict[str, tuple[str, ...]]] = {
         "agibot": ("observation.images.head",),
@@ -1766,10 +1834,6 @@ class MultiDatasetPretrainDataConfig(DataConfigFactory):
             overrides=self._FACTORY_OVERRIDES.get(spec.dataset_type, {}),
         )
         if training_stage == "post_training" and self.use_canonical_delta_actions:
-            if spec.dataset_type == "agibot" and "canonical_gripper_action_space" in field_names:
-                kwargs["canonical_gripper_action_space"] = "ee_pose"
-            if spec.dataset_type == "intern_a1" and "canonical_action_space" in field_names:
-                kwargs["canonical_action_space"] = "ee_pose"
             if spec.dataset_type in {"libero", "libero_plus"} and "treat_actions_as_commands" in field_names:
                 kwargs["treat_actions_as_commands"] = True
         if spec.dataset_type == "agibot" and "canonical_gripper_action_space" in field_names:
@@ -1909,11 +1973,6 @@ class MultiDatasetPretrainDataConfig(DataConfigFactory):
             # into a different training space inside the policy transform, so
             # the post-transform descriptor does not match raw info.json
             # dimensions.
-            return
-        if dataset_type in {"agibot", "intern_a1"} and descriptor.state_semantics == "ee_pose":
-            # AgiBot and InternData can be loaded from raw/local exports
-            # whose on-disk state/action layout is not yet canonicalized even
-            # though the training transform lifts them into canonical ee pose.
             return
         local_layout = _resolve_local_state_action_layout(repo_id)
         if local_layout is None:

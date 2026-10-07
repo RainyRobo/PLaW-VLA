@@ -7,7 +7,6 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-import shutil
 import sys
 
 THIS_DIR = Path(__file__).resolve().parent
@@ -40,9 +39,7 @@ def _parse_column_renames(values: list[str]) -> dict[str, str]:
         if not separator or not source or not target:
             raise ValueError(f"Expected --column-rename in the form source=target, got {value!r}.")
         if source in renames and renames[source] != target:
-            raise ValueError(
-                f"Duplicate --column-rename for {source!r}: {renames[source]!r} vs {target!r}."
-            )
+            raise ValueError(f"Duplicate --column-rename for {source!r}: {renames[source]!r} vs {target!r}.")
         renames[source] = target
     return renames
 
@@ -54,8 +51,7 @@ def _parse_vector_element_remaps(values: list[str]) -> tuple[lerobot_v21.VectorE
         index_text, second_sep, mapping_text = remainder.partition(":")
         if not first_sep or not second_sep or not column_name or not index_text or not mapping_text:
             raise ValueError(
-                "Expected --vector-element-remap in the form column:index:src=dst[,src=dst...], "
-                f"got {value!r}."
+                f"Expected --vector-element-remap in the form column:index:src=dst[,src=dst...], got {value!r}."
             )
 
         mappings: list[tuple[float, float]] = []
@@ -63,8 +59,7 @@ def _parse_vector_element_remaps(values: list[str]) -> tuple[lerobot_v21.VectorE
             source_text, pair_sep, target_text = pair_text.partition("=")
             if not pair_sep or not source_text or not target_text:
                 raise ValueError(
-                    "Expected each --vector-element-remap mapping to use src=dst syntax, "
-                    f"got {pair_text!r}."
+                    f"Expected each --vector-element-remap mapping to use src=dst syntax, got {pair_text!r}."
                 )
             mappings.append((float(source_text), float(target_text)))
 
@@ -82,8 +77,6 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input-root", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--staging-root", type=Path, default=None)
-    parser.add_argument("--link-mode", choices=("copy", "hardlink", "symlink", "auto"), default="copy")
     parser.add_argument("--conversion-num-workers", type=int, default=None)
     parser.add_argument("--ray-temp-root", type=Path, default=None)
     parser.add_argument("--cleanup-tmp-on-success", action="store_true")
@@ -110,12 +103,10 @@ def main() -> None:
 
     input_root = args.input_root.expanduser().resolve()
     output_root = args.output_dir.expanduser().resolve()
+    if output_root == input_root or output_root in input_root.parents:
+        raise ValueError("Output directory must not be the input directory or an ancestor of it.")
     column_renames = _parse_column_renames(args.column_rename)
     vector_element_remaps = _parse_vector_element_remaps(args.vector_element_remap)
-    if args.staging_root is not None:
-        CONSOLE.print("[yellow]Ignoring --staging-root: shard mode writes directly to --output-dir.")
-    if args.link_mode != "copy":
-        CONSOLE.print("[yellow]Ignoring --link-mode: v3 conversion now always builds real shard files.")
     build_root = output_root
     if output_root.exists() and not args.overwrite:
         if not lerobot_v21.is_v3_dataset_root(output_root):
@@ -132,8 +123,6 @@ def main() -> None:
             )
         print(json.dumps(summary, indent=2))
         return
-    if build_root.exists():
-        shutil.rmtree(build_root)
     temp_dir = ray_runtime.resolve_ray_temp_dir(
         label="v20-v30",
         unique_key=str(build_root),
@@ -154,7 +143,7 @@ def main() -> None:
         summary = lerobot_v20.convert_dataset(
             input_root,
             build_root,
-            link_mode=args.link_mode,
+            link_mode="copy",
             overwrite=args.overwrite,
             conversion_num_workers=args.conversion_num_workers,
             bundle=bundle,

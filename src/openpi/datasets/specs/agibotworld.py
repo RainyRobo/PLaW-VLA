@@ -1,4 +1,8 @@
-# Copyright 2026 PLaW-VLA authors. SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 PLaW-VLA authors.
+# SPDX-License-Identifier: Apache-2.0 AND MIT
+# AgiBot loading/configuration portions adapted from Any4LeRobot.
+# Copyright (c) 2025 Qizhi Chen (MIT).
+# Modified for PLaW-VLA; see NOTICE and LICENSES/MIT-Any4LeRobot.txt.
 """Shared AgiBot-World raw-data helpers for direct LeRobot v3 builders."""
 
 from __future__ import annotations
@@ -659,8 +663,8 @@ def _write_dataset_info_labels(dataset_root: Path, *, eef_type: str) -> None:
         raise FileNotFoundError(f"Dataset info.json not found at {info_path}")
     with info_path.open("r", encoding="utf-8") as f:
         info = json.load(f)
-    info["openpi_embodiment"] = eef_type
-    info["openpi_agibot_eef_type"] = eef_type
+    info["embodiment"] = eef_type
+    info["agibot_eef_type"] = eef_type
     with info_path.open("w", encoding="utf-8") as f:
         json.dump(info, f, indent=2)
 

@@ -47,7 +47,13 @@
   <img src="assets/teaser.png" alt="Overview of PLaW-VLA and its evaluation results" width="100%">
 </p>
 
-PLaW-VLA predicts future visual representations in a pretrained V-JEPA 2 latent space and conditions an action expert on those predictions. The three-stage recipe learns latent prediction from human and robot videos, jointly trains prediction and action generation on robot trajectories, and fine-tunes the policy for downstream tasks.
+PLaW-VLA is a vision-language-action framework that predicts future visual states in the latent space of a frozen V-JEPA 2 encoder. A Mixture-of-Transformers architecture combines vision-language, latent world-model, and action experts. Learnable future queries connect visual history and language context to future-state prediction, while structured attention allows the action expert to use the predicted representations for continuous action generation.
+
+The training recipe connects video predictive learning to robot policy learning in three stages:
+
+- **Stage I — World-model pretraining:** Learn latent prediction from human and robot videos without action annotations.
+- **Stage II — Joint pretraining:** Train future prediction and action generation together on robot trajectories.
+- **Stage III — Policy fine-tuning:** Adapt the policy to downstream tasks and embodiments.
 
 This repository provides the model, training pipeline, data preparation tools, and a WebSocket policy server. **LIBERO is the supported benchmark.** Optional RoboTwin and LIBERO-Plus clients are available for research use; support for both remains planned. The `openpi` and `openpi_client` package names follow the upstream implementation.
 
@@ -134,7 +140,7 @@ MUJOCO_GL=egl uv run --project examples/libero --frozen python examples/libero/m
   --task-suite-name libero_spatial --seed 42
 ```
 
-Other suites are `libero_object`, `libero_goal`, and `libero_10`. See [the LIBERO guide](examples/libero/README.md) for task selection and batch evaluation, and [remote inference](docs/remote_inference.md) for the client protocol. Optional benchmarks have [a separate guide](docs/benchmarks.md).
+Other suites are `libero_object`, `libero_goal`, and `libero_10`. See [the LIBERO guide](examples/libero/README.md) for task selection and batch evaluation, and [remote inference](docs/remote_inference.md) for the client protocol. Optional benchmarks have [a separate guide](docs/benchmarks.md); LIBERO-Plus evaluates the LIBERO-trained policy without additional fine-tuning.
 
 ## Repository guide
 
@@ -145,6 +151,7 @@ Other suites are `libero_object`, `libero_goal`, and `libero_10`. See [the LIBER
 | [src/openpi/policies](src/openpi/policies) | Dataset and benchmark observation/action adapters |
 | [src/openpi/datasets](src/openpi/datasets) | Local conversion, merging, and LeRobot format helpers |
 | [scripts](scripts) | Resource preparation, normalization, training, and serving |
+| [scripts/data](scripts/data) | Dataset format upgrades and the shared conversion environment |
 | [examples](examples) | Dataset converters and benchmark clients |
 | [packages/openpi-client](packages/openpi-client) | Lightweight WebSocket client |
 | [docs](docs) | Data preparation, pretraining, normalization, and inference guides |
@@ -154,12 +161,13 @@ Other suites are `libero_object`, `libero_goal`, and `libero_10`. See [the LIBER
 - [x] ~~Three-stage training pipeline~~
 - [x] ~~Local data conversion and pretraining recipes~~
 - [x] ~~LIBERO fine-tuning and evaluation~~
+- [ ] Release pretrained checkpoints
 - [ ] RoboTwin fine-tuning and evaluation
-- [ ] LIBERO-Plus fine-tuning and evaluation
+- [ ] LIBERO-Plus evaluation
 
 ## License
 
-PLaW-VLA code is licensed under [Apache-2.0](LICENSE), with third-party exceptions and attributions in [NOTICE](NOTICE) and [LICENSES](LICENSES). Data, base models, and future checkpoint releases have separate terms; see [the licensing guide](docs/licenses.md). LIBERO-Plus remains an optional external dependency whose upstream code license is unresolved ([upstream issue](https://github.com/sylvestf/LIBERO-plus/issues/68)); its source and assets are excluded from Python distributions.
+PLaW-VLA code is licensed under [Apache-2.0](LICENSE), with third-party exceptions and attributions in [NOTICE](NOTICE) and [LICENSES](LICENSES). Data, base models, and future checkpoint releases have separate terms; see [the licensing guide](docs/licenses.md).
 
 ## Citation
 
@@ -178,4 +186,6 @@ PLaW-VLA code is licensed under [Apache-2.0](LICENSE), with third-party exceptio
 
 ## Acknowledgments
 
-This repository is organized from [LWM-VLA](https://github.com/RainyRobo/LWM-VLA) and builds on [openpi](https://github.com/Physical-Intelligence/openpi), [V-JEPA 2](https://github.com/facebookresearch/vjepa2), [LIBERO](https://github.com/Lifelong-Robot-Learning/LIBERO), [LeRobot](https://github.com/huggingface/lerobot), and [Big Vision](https://github.com/google-research/big_vision). Optional benchmark adapters build on [RoboTwin](https://github.com/RoboTwin-Platform/RoboTwin), [LingBot-VLA](https://github.com/Robbyant/lingbot-vla), and [LIBERO-Plus](https://github.com/sylvestf/LIBERO-plus).
+This implementation builds on [openpi](https://github.com/Physical-Intelligence/openpi) for the base policy and training infrastructure, [V-JEPA 2](https://github.com/facebookresearch/vjepa2) for visual predictive representations, and [Big Vision](https://github.com/google-research/big_vision) for vision-language model components. We thank the authors for making these foundations available to the robotics community.
+
+We also thank [LIBERO](https://github.com/Lifelong-Robot-Learning/LIBERO) for the evaluation environment, [LeRobot](https://github.com/huggingface/lerobot) for dataset tools, and [any4lerobot](https://github.com/Tavish9/any4lerobot) for conversion utilities adapted in this repository.

@@ -796,7 +796,7 @@ class WeightedConcatDataset(Dataset):
 
 
 class WeightedGroupSampler(torch.utils.data.Sampler[int]):
-    """Sample from concatenated datasets by first sampling a parent group, then a frame within that group."""
+    """Sample parent groups and frames with an independent, reproducible stream per rank."""
 
     def __init__(
         self,
@@ -806,6 +806,8 @@ class WeightedGroupSampler(torch.utils.data.Sampler[int]):
         num_samples: int,
         generator: torch.Generator | None = None,
         chunk_size: int = 65_536,
+        num_replicas: int = 1,
+        rank: int = 0,
     ):
         if len(group_dataset_lengths) != len(group_weights):
             raise ValueError(
@@ -818,10 +820,14 @@ class WeightedGroupSampler(torch.utils.data.Sampler[int]):
             raise ValueError(f"num_samples must be > 0, got {num_samples}.")
         if chunk_size <= 0:
             raise ValueError(f"chunk_size must be > 0, got {chunk_size}.")
+        if num_replicas <= 0 or not 0 <= rank < num_replicas:
+            raise ValueError(f"Invalid distributed sampler rank={rank}, num_replicas={num_replicas}.")
+        if num_samples < num_replicas:
+            raise ValueError(f"Cannot distribute {num_samples} samples across {num_replicas} replicas.")
 
         self._group_weights = torch.as_tensor(group_weights, dtype=torch.double)
-        if torch.any(self._group_weights < 0):
-            raise ValueError(f"group_weights must be non-negative, got {group_weights}.")
+        if not torch.isfinite(self._group_weights).all() or torch.any(self._group_weights < 0):
+            raise ValueError(f"group_weights must be finite and non-negative, got {group_weights}.")
         if torch.sum(self._group_weights) <= 0:
             raise ValueError(f"group_weights must sum to a positive value, got {group_weights}.")
 
@@ -849,14 +855,21 @@ class WeightedGroupSampler(torch.utils.data.Sampler[int]):
             self._group_child_cumulative.append(torch.tensor(child_cumulative, dtype=torch.int64))
             global_offset += group_running
 
-        self._num_samples = num_samples
-        self._generator = generator if generator is not None else torch.Generator()
+        self._num_samples = num_samples // num_replicas
+        self._seed = (generator if generator is not None else torch.Generator()).initial_seed()
+        self._num_replicas = num_replicas
+        self._rank = rank
+        self._epoch = 0
         self._chunk_size = chunk_size
 
     def __len__(self) -> int:
         return self._num_samples
 
+    def set_epoch(self, epoch: int) -> None:
+        self._epoch = int(epoch)
+
     def __iter__(self):
+        generator = torch.Generator().manual_seed(self._seed + self._epoch * self._num_replicas + self._rank)
         remaining = self._num_samples
         while remaining > 0:
             chunk = min(self._chunk_size, remaining)
@@ -864,7 +877,7 @@ class WeightedGroupSampler(torch.utils.data.Sampler[int]):
                 self._group_weights,
                 chunk,
                 replacement=True,
-                generator=self._generator,
+                generator=generator,
             )
             sampled_indices = torch.empty(chunk, dtype=torch.int64)
 
@@ -873,7 +886,7 @@ class WeightedGroupSampler(torch.utils.data.Sampler[int]):
                 local_offsets = torch.randint(
                     self._group_total_frames[group_idx],
                     (positions.numel(),),
-                    generator=self._generator,
+                    generator=generator,
                     dtype=torch.int64,
                 )
                 child_cumulative = self._group_child_cumulative[group_idx]
@@ -1041,6 +1054,8 @@ class FakeDataset(Dataset):
 
 
 def _expand_data_config_children(data_config: _config.DataConfig) -> list[_config.DataConfig]:
+    if data_config.child_configs:
+        return list(data_config.child_configs)
     repo_ids = data_config.repo_id
     if not isinstance(repo_ids, Sequence) or isinstance(repo_ids, str):
         return [data_config]
@@ -1306,6 +1321,21 @@ def create_data_loader(
         skip_norm_stats: Whether to skip data normalization.
         framework: The framework to use ("jax" or "pytorch").
     """
+    if isinstance(config.data, _config.MultiDatasetPretrainDataConfig):
+        return create_multi_torch_data_loader(
+            config.data.create_all(config.assets_dirs, config.model),
+            model_config=config.model,
+            action_horizon=config.model.action_horizon,
+            batch_size=config.batch_size,
+            sharding=sharding,
+            shuffle=shuffle,
+            num_batches=num_batches,
+            num_workers=config.num_workers,
+            seed=config.seed,
+            skip_norm_stats=skip_norm_stats or config.training_stage == "wm_alignment",
+            framework=framework,
+        )
+
     effective_skip_norm_stats = skip_norm_stats
 
     data_config = config.data.create(config.assets_dirs, config.model)
@@ -1470,20 +1500,29 @@ def create_multi_torch_data_loader(
 
     sampler_generator = torch.Generator()
     sampler_generator.manual_seed(seed)
+    num_replicas = 1
+    rank = 0
+    if framework == "pytorch" and torch.distributed.is_initialized():
+        num_replicas = torch.distributed.get_world_size()
+        rank = torch.distributed.get_rank()
     sampler = WeightedGroupSampler(
         group_dataset_lengths,
         group_weights,
         num_samples=len(combined),
         generator=sampler_generator,
+        num_replicas=num_replicas,
+        rank=rank,
     )
 
     if framework == "pytorch":
-        local_batch_size = batch_size
-        if torch.distributed.is_initialized():
-            local_batch_size = batch_size // torch.distributed.get_world_size()
+        if batch_size % num_replicas:
+            raise ValueError(f"Batch size {batch_size} must be divisible by {num_replicas} replicas.")
+        local_batch_size = batch_size // num_replicas
     else:
         local_batch_size = batch_size // jax.process_count()
 
+    if len(sampler) < local_batch_size:
+        raise ValueError(f"Local batch size {local_batch_size} exceeds {len(sampler)} sampled frames per rank.")
     logging.info(f"local_batch_size: {local_batch_size}")
     data_loader = TorchDataLoader(
         combined,
@@ -1497,21 +1536,29 @@ def create_multi_torch_data_loader(
         framework=framework,
     )
 
-    if checkpoint_asset_metadata is None:
-        checkpoint_asset_metadata = [
-            {
-                "repo_id": data_config.repo_id,
-                "asset_id": data_config.asset_id,
-                "weight": weight,
-            }
-            for data_config, weight in data_configs
-        ]
+    child_configs = []
+    child_metadata = []
+    for group_index, (data_config, weight) in enumerate(data_configs):
+        metadata = dict(checkpoint_asset_metadata[group_index]) if checkpoint_asset_metadata is not None else {}
+        metadata.pop("index", None)
+        for child_config in _expand_data_config_children(data_config):
+            child_configs.append(child_config)
+            child_metadata.append(
+                {
+                    **metadata,
+                    "dataset_type": child_config.dataset_type or metadata.get("dataset_type"),
+                    "source_group": group_index,
+                    "repo_id": child_config.repo_id,
+                    "asset_id": child_config.asset_id,
+                    "weight": weight,
+                }
+            )
 
     return DataLoaderImpl(
         data_configs[0][0],
         data_loader,
-        data_configs=[data_config for data_config, _ in data_configs],
-        checkpoint_asset_metadata=checkpoint_asset_metadata,
+        data_configs=child_configs,
+        checkpoint_asset_metadata=child_metadata,
         seed=seed,
         framework=framework,
     )

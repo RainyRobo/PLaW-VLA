@@ -64,7 +64,7 @@ def _resolve_workers(requested: int | None, job_count: int) -> int:
 
 
 def _resolve_ray_prepare_cpus() -> float:
-    raw = os.environ.get("OPENPI_RAY_PREPARE_CPUS", "0.5")
+    raw = os.environ.get("RAY_PREPARE_CPUS", "0.5")
     try:
         value = float(raw)
     except ValueError:
@@ -98,12 +98,22 @@ def _load_bundles(dataset_dirs: list[Path], *, workers: int) -> list[lerobot_v21
     return bundles
 
 
+def _validate_output_path(path: Path, source_paths: tuple[Path, ...]) -> None:
+    for source_path in source_paths:
+        if path == source_path or path in source_path.parents:
+            raise ValueError("Output directory must not be an input directory or an ancestor of it.")
+
+
 def main(args: Args) -> None:
     grouped = robotwin_datasets.discover_child_datasets(args.input_roots, embodiments=args.embodiments)
     if not grouped:
         raise FileNotFoundError("No RobotWin LeRobot v2.1 child datasets matched the requested selection.")
 
+    source_paths = tuple(path.expanduser().resolve() for path in args.input_roots) + tuple(
+        dataset.root for datasets in grouped.values() for dataset in datasets
+    )
     output_root = args.output_dir.expanduser().resolve()
+    _validate_output_path(output_root, source_paths)
     if output_root.exists() and not args.overwrite:
         summaries: list[dict[str, object]] = []
         for embodiment in grouped:
@@ -134,6 +144,7 @@ def main(args: Args) -> None:
         if should_stage
         else None
     ) or output_root
+    _validate_output_path(build_root, source_paths)
     using_staging = build_root != output_root
     if output_root.exists() and not args.overwrite:
         raise FileExistsError(f"Output already exists: {output_root}")
@@ -218,6 +229,7 @@ def main(args: Args) -> None:
             CONSOLE.print(f"[green]Cleaned temporary paths:[/green] {', '.join(str(path) for path in cleaned)}")
 
     print(json.dumps(summaries, indent=2))
+
 
 if __name__ == "__main__":
     main(tyro.cli(Args))
