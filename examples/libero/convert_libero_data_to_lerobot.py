@@ -1,26 +1,28 @@
+# Derived from openpi (Copyright 2024 Physical Intelligence, Inc.; Apache-2.0).
+# Modified for PLaW-VLA by the PLaW-VLA authors, 2026.
 """Convert raw LIBERO RLDS episodes to a LeRobot v3 dataset.
 
-The written keys match ``LeRobotLiberoDataConfig`` defaults:
+The output contains:
 
 - ``observation.images.image``
 - ``observation.images.wrist_image``
 - ``observation.state`` (8D raw end-effector state)
-- ``action`` (7D signed gripper command)
+- ``action`` (7D controller command with a signed gripper value)
 
-That is not the released ``libero_v3_eef`` layout. Point a new ``TrainConfig`` at
-the output directory and set ``dataset_action_gripper_format="signed_command"``.
+Use a custom ``TrainConfig`` that matches these raw features and declares
+``dataset_action_gripper_format="signed_command"``. The canonical EEF recipe
+uses a different layout; see ``docs/data.md`` for the HDF5 converter.
 
 Usage:
-uv run examples/libero/convert_libero_data_to_lerobot.py --data-dir /path/to/your/data
+
+    python examples/libero/convert_libero_data_to_lerobot.py --data-dir /path/to/rlds --output-dir /path/to/converted/libero
 
 Raw LIBERO RLDS lives at https://huggingface.co/datasets/openvla/modified_libero_rlds.
-This script needs TensorFlow Datasets:
-
-    uv pip install tensorflow tensorflow_datasets
+Run this example in a conversion environment with LeRobot, TensorFlow, and
+TensorFlow Datasets installed. Output remains local.
 """
 
 import pathlib
-import shutil
 
 import numpy as np
 import tyro
@@ -70,7 +72,7 @@ def convert_libero(data_dir: str, output_dir: pathlib.Path, *, push_to_hub: bool
     import tensorflow_datasets as tfds
 
     if output_dir.exists():
-        shutil.rmtree(output_dir)
+        raise FileExistsError(f"Output already exists: {output_dir}; choose a new output directory.")
 
     dataset = LeRobotDataset.create(
         repo_id=REPO_NAME,
@@ -102,12 +104,7 @@ def convert_libero(data_dir: str, output_dir: pathlib.Path, *, push_to_hub: bool
     dataset.finalize()
 
     if push_to_hub:
-        dataset.push_to_hub(
-            tags=["libero", "panda", "rlds"],
-            private=False,
-            push_videos=False,
-            license="apache-2.0",
-        )
+        raise ValueError("Publishing converted datasets requires separately verified source-data licensing.")
     return output_dir
 
 

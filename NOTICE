@@ -1,35 +1,42 @@
 PLaW-VLA
 Copyright 2026 PLaW-VLA authors
 
-This software includes material from:
+PLaW-VLA code is distributed under Apache-2.0 (LICENSE), except for
+components identified below, which retain their upstream licenses.
+Modifications to upstream code are identified in the source files.
 
-- openpi, Copyright 2024 Physical Intelligence, Inc. (Apache-2.0)
-- Big Vision, Copyright Google LLC and the Big Vision authors (Apache-2.0)
-- Hugging Face Transformers, Copyright the Hugging Face team (Apache-2.0)
-- V-JEPA 2, Copyright Meta Platforms, Inc. and affiliates (MIT)
+Derived code:
+- openpi: Copyright 2024 Physical Intelligence, Inc.; Apache-2.0.
+- Big Vision: Copyright Google LLC and Big Vision Authors; Apache-2.0.
+- Hugging Face Transformers: Copyright Google and Hugging Face contributors;
+  Apache-2.0. Original copyright notices are retained in the patched files.
+- DINO: Copyright (c) Facebook, Inc. and its affiliates; Apache-2.0.
+- DINOv2: Copyright (c) Meta Platforms, Inc. and affiliates; Apache-2.0.
+  Positional embedding interpolation in the Transformers SigLIP patch adapts
+  these implementations; their source references and notices are retained.
+- LeRobot: Copyright Hugging Face contributors; Apache-2.0.
+  Dataset conversion helpers adapt the LeRobot dataset format and writer.
+- LingBot-VLA: Copyright 2026 Robbyant Team; Apache-2.0.
+  RoboTwin evaluation client portions are adapted from its benchmark integration.
+- RoboTwin: Copyright (c) 2025 Tianxing Chen (陈天行); MIT.
+  Applies to upstream-derived portions of examples/robotwin/main.py.
+  See LICENSES/MIT-RoboTwin.txt for the complete license.
+- msgpack-numpy: Copyright (c) 2013-2022, Lev E. Givon; BSD-3-Clause.
+  Applies to openpi_client/msgpack_numpy.py.
+  The complete notice and license are in LICENSES/BSD-3-Clause-msgpack-numpy.txt.
 
-The Apache License, Version 2.0 is provided in LICENSE.
+External models and benchmarks retain their own terms:
+- V-JEPA 2: Copyright Meta Platforms, Inc. and affiliates; MIT.
+  See LICENSES/MIT-V-JEPA-2.txt.
+- Gemma is provided under and subject to the Gemma Terms of Use found at
+  ai.google.dev/gemma/terms. The upstream terms supplied with openpi are
+  retained in LICENSE_GEMMA.txt. Model users must consult the terms applicable
+  to the model they obtain; Apache-2.0 does not replace those terms.
+- LIBERO and RoboTwin are external MIT-licensed benchmark dependencies.
+- LIBERO-Plus is an optional external dependency. Its upstream code repository
+  has not declared a code license; PLaW-VLA does not grant rights to that code.
 
-V-JEPA 2 MIT License
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-Gemma is provided under and subject to the Gemma Terms of Use found at
-ai.google.dev/gemma/terms. A copy of those terms is provided in
-LICENSE_GEMMA.txt.
+Datasets and downloaded weights are not redistributed in this package and
+are not covered by PLaW-VLA's code license. Their terms and sources are
+listed in the user guides. External submodule source and assets are excluded
+from the Python distributions.

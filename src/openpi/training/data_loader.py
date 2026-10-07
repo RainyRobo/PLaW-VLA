@@ -1,3 +1,5 @@
+# Derived from openpi (Copyright 2024 Physical Intelligence, Inc.; Apache-2.0).
+# Modified for PLaW-VLA by the PLaW-VLA authors, 2026.
 import ast
 from collections.abc import Iterator, Sequence
 import dataclasses
@@ -126,7 +128,7 @@ def _patch_lerobot_hf_dataset_column_access() -> None:
 
 def _default_lerobot_video_backend() -> str:
     """Use the most stable default backend while preserving explicit env overrides."""
-    if backend := os.environ.get("PLAW_VLA_LEROBOT_VIDEO_BACKEND"):
+    if backend := os.environ.get("LEROBOT_VIDEO_BACKEND"):
         return backend
     return "pyav"
 
@@ -150,28 +152,28 @@ def _env_flag(name: str) -> bool:
 
 
 def _retryable_bad_sample_log_path() -> pathlib.Path:
-    raw_path = os.environ.get("PLAW_VLA_BAD_SAMPLE_LOG_PATH")
+    raw_path = os.environ.get("BAD_SAMPLE_LOG_PATH")
     if raw_path:
         return pathlib.Path(raw_path).expanduser()
     return pathlib.Path.cwd() / "plaw_vla_bad_samples.log"
 
 
 def _max_bad_sample_retries() -> int:
-    raw = os.environ.get("PLAW_VLA_BAD_SAMPLE_RETRIES", "32").strip()
+    raw = os.environ.get("BAD_SAMPLE_RETRIES", "32").strip()
     try:
         value = int(raw)
     except ValueError:
-        logging.warning("Invalid PLAW_VLA_BAD_SAMPLE_RETRIES=%r; defaulting to 32.", raw)
+        logging.warning("Invalid BAD_SAMPLE_RETRIES=%r; defaulting to 32.", raw)
         value = 32
     return max(0, value)
 
 
 def _bad_sample_log_sync_interval_s() -> float:
-    raw = os.environ.get("PLAW_VLA_BAD_SAMPLE_LOG_SYNC_INTERVAL_S", "1.0").strip()
+    raw = os.environ.get("BAD_SAMPLE_LOG_SYNC_INTERVAL_S", "1.0").strip()
     try:
         value = float(raw)
     except ValueError:
-        logging.warning("Invalid PLAW_VLA_BAD_SAMPLE_LOG_SYNC_INTERVAL_S=%r; defaulting to 1.0.", raw)
+        logging.warning("Invalid BAD_SAMPLE_LOG_SYNC_INTERVAL_S=%r; defaulting to 1.0.", raw)
         value = 1.0
     return max(0.0, value)
 
@@ -386,7 +388,7 @@ def _apply_lerobot_startup_patches() -> None:
             _DEFAULT_LEROBOT_PARQUET_NUM_PROC,
         )
 
-    if _env_flag("PLAW_VLA_SKIP_LEROBOT_VIDEO_FILE_CHECK") and not _LEROBOT_VIDEO_CHECK_PATCH_ACTIVE:
+    if _env_flag("SKIP_LEROBOT_VIDEO_FILE_CHECK") and not _LEROBOT_VIDEO_CHECK_PATCH_ACTIVE:
         lerobot_dataset.LeRobotDataset._check_cached_episodes_sufficient = (
             _check_cached_episodes_without_video_file_scan
         )

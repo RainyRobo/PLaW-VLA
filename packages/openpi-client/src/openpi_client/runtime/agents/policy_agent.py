@@ -1,3 +1,5 @@
+# Derived from openpi (Copyright 2024 Physical Intelligence, Inc.; Apache-2.0).
+# Modified for PLaW-VLA by the PLaW-VLA authors, 2026.
 from typing_extensions import override
 
 from openpi_client import base_policy as _base_policy

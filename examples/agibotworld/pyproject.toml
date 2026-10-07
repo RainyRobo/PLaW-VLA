@@ -1,0 +1,26 @@
+[project]
+name = "agibotworld-convert"
+version = "0.2.0"
+description = "AgiBot-World data conversion to LeRobot v3.0 format"
+requires-python = ">=3.12"
+dependencies = [
+    "chex",
+    "h5py",
+    "lerobot",
+    "numpy>=1.22.4,<2.3.0",
+    "Pillow>=11.0.0",
+    "pyarrow",
+    "ray",
+    "rich>=14.0.0",
+    "av",
+    "tqdm",
+    "tyro",
+    "datasets>=4.0.0,<5.0.0",
+]
+
+[tool.uv]
+no-build-package = ["av"]
+override-dependencies = ["av>=15.0.0"]
+
+[tool.uv.sources]
+lerobot = { git = "https://github.com/huggingface/lerobot", rev = "017ff73fbfe46bf9a673cd9b402988dcb79151f7" }

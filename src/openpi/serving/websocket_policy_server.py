@@ -1,3 +1,5 @@
+# Derived from openpi (Copyright 2024 Physical Intelligence, Inc.; Apache-2.0).
+# Modified for PLaW-VLA by the PLaW-VLA authors, 2026.
 import asyncio
 import http
 import logging
@@ -14,9 +16,10 @@ logger = logging.getLogger(__name__)
 
 
 class WebsocketPolicyServer:
-    """Serves a policy using the websocket protocol. See websocket_client_policy.py for a client implementation.
+    """Send policy metadata on connection, then infer actions from observations.
 
-    Currently only implements the `load` and `infer` methods.
+    Messages use the msgpack format shared with
+    ``openpi_client.websocket_client_policy.WebsocketClientPolicy``.
     """
 
     def __init__(

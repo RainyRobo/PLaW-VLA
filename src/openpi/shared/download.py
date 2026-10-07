@@ -1,3 +1,5 @@
+# Derived from openpi (Copyright 2024 Physical Intelligence, Inc.; Apache-2.0).
+# Modified for PLaW-VLA by the PLaW-VLA authors, 2026.
 import concurrent.futures
 import datetime
 import logging
@@ -14,19 +16,14 @@ import fsspec
 import fsspec.generic
 import tqdm_loggable.auto as tqdm
 
-# OPENPI_DATA_HOME remains a compatibility fallback for users who already have
-# the public π₀.₅ checkpoint cached there.
-_DATA_HOME = "PLAW_VLA_DATA_HOME"
-_LEGACY_DATA_HOME = "OPENPI_DATA_HOME"
+_DATA_HOME = "DATA_HOME"
 DEFAULT_CACHE_DIR = "~/.cache/plaw-vla"
 
 logger = logging.getLogger(__name__)
 
 
 def get_cache_dir() -> pathlib.Path:
-    cache_dir = pathlib.Path(
-        os.getenv(_DATA_HOME, os.getenv(_LEGACY_DATA_HOME, DEFAULT_CACHE_DIR))
-    ).expanduser().resolve()
+    cache_dir = pathlib.Path(os.getenv(_DATA_HOME, DEFAULT_CACHE_DIR)).expanduser().resolve()
     cache_dir.mkdir(parents=True, exist_ok=True)
     _set_folder_permission(cache_dir)
     return cache_dir

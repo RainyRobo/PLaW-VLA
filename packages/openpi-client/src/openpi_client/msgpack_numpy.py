@@ -1,3 +1,7 @@
+# Copyright (c) 2013-2022, Lev E. Givon.
+# Adapted under BSD-3-Clause; see LICENSES/BSD-3-Clause-msgpack-numpy.txt.
+# Modifications Copyright 2024 Physical Intelligence, Inc. and 2026 PLaW-VLA authors.
+
 """Adds NumPy array support to msgpack.
 
 msgpack is good for (de)serializing data over a network for multiple reasons:

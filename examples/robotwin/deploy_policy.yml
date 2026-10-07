@@ -1,0 +1,17 @@
+# Defaults for examples/robotwin/main.py.
+# Concrete values are supplied at launch time via --overrides.
+policy_name: null
+task_name: null
+task_config: null
+ckpt_setting: null
+seed: 42
+expert_check: false
+instruction_type: seen
+
+train_config_name: null
+model_name: null
+
+# Per-inference execution budget. Server's stage3_finetuning_robotwin uses
+# action_horizon=10; valid values are 1..10. Smaller -> replan more often.
+# Matches the LIBERO/RobotWin default of replan_steps=5.
+replan_steps: 3

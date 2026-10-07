@@ -1,7 +1,14 @@
-# uv run scripts/serve_policy.py policy:checkpoint --policy.config=stage3_finetuning_libero --policy.dir=checkpoints/stage3_finetuning_libero/my_experiment/30000
-# TORCH_COMPILE_DISABLE=1 uv run scripts/serve_policy.py policy:checkpoint --policy.config=stage3_finetuning_libero --policy.dir=<checkpoint_dir>
-# uv run scripts/serve_policy.py --env LIBERO
-# uv run scripts/serve_policy.py policy:checkpoint --policy.config=stage3_finetuning_libero --policy.dir=<checkpoint_dir>
+# Derived from openpi (Copyright 2024 Physical Intelligence, Inc.; Apache-2.0).
+# Modified for PLaW-VLA by the PLaW-VLA authors, 2026.
+"""Serve a trained policy over the shared websocket protocol.
+
+Pass the training config and the checkpoint directory explicitly::
+
+    uv run scripts/serve_policy.py policy:checkpoint \
+        --policy.config=stage3_finetuning_libero \
+        --policy.dir=checkpoints/stage3_finetuning_libero/<run_name>/<step>
+"""
+
 import dataclasses
 import enum
 import logging
@@ -17,9 +24,10 @@ from openpi.training import config as _config
 
 
 class EnvMode(enum.Enum):
-    """Supported environments."""
+    """Policy environments accepted by the serving entrypoints."""
 
     LIBERO = "libero"
+    ROBOTWIN = "robotwin"
 
 
 @dataclasses.dataclass
@@ -57,10 +65,6 @@ class Args:
     policy: Checkpoint | Default = dataclasses.field(default_factory=Default)
 
     pytorch_device: str | None = None
-    # Explicit escape hatch for checkpoints created before normalization
-    # contracts were recorded. Such servers advertise that the LIBERO client
-    # must enable its legacy gripper compatibility path.
-    allow_legacy_norm_stats: bool = False
 
 
 # Register named default checkpoints here when needed. Until then, pass
@@ -99,21 +103,13 @@ def create_policy(args: Args) -> _policy.Policy:
             train_config = _config.get_config(args.policy.config)
             train_config = dataclasses.replace(
                 train_config,
-                policy_metadata={
-                    **_policy_input_spec.build_server_metadata(train_config),
-                    **(
-                        {"legacy_gripper_compat_required": True}
-                        if args.allow_legacy_norm_stats and args.env == EnvMode.LIBERO
-                        else {}
-                    ),
-                },
+                policy_metadata=_policy_input_spec.build_server_metadata(train_config),
             )
             return _policy_config.create_trained_policy(
                 train_config,
                 args.policy.dir,
                 default_prompt=args.default_prompt,
                 pytorch_device=args.pytorch_device,
-                allow_legacy_norm_stats=args.allow_legacy_norm_stats,
             )
         case Default():
             return create_default_policy(
@@ -121,6 +117,7 @@ def create_policy(args: Args) -> _policy.Policy:
                 default_prompt=args.default_prompt,
                 pytorch_device=args.pytorch_device,
             )
+
 
 def main(args: Args) -> None:
     policy = create_policy(args)

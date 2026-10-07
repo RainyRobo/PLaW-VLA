@@ -1,3 +1,5 @@
+# Derived from openpi (Copyright 2024 Physical Intelligence, Inc.; Apache-2.0).
+# Modified for PLaW-VLA by the PLaW-VLA authors, 2026.
 import abc
 from collections.abc import Sequence
 import dataclasses
@@ -43,7 +45,7 @@ IMAGE_KEYS = (
 )
 
 
-# This may need change if we release a small model.
+# Spatial resolution of the policy's vision inputs.
 IMAGE_RESOLUTION = (224, 224)
 
 

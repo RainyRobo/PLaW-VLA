@@ -1,3 +1,5 @@
+# Derived from openpi (Copyright 2024 Physical Intelligence, Inc.; Apache-2.0).
+# Modified for PLaW-VLA by the PLaW-VLA authors, 2026.
 # coding=utf-8
 # Copyright 2024 Google AI and The HuggingFace Team. All rights reserved.
 #
@@ -230,6 +232,9 @@ class SiglipVisionEmbeddings(nn.Module):
         self.position_embedding = nn.Embedding(self.num_positions, self.embed_dim)
         self.register_buffer("position_ids", torch.arange(self.num_positions).expand((1, -1)), persistent=False)
 
+    # DINO-derived interpolation: Copyright (c) Facebook, Inc. and its affiliates.
+    # DINOv2-derived interpolation: Copyright (c) Meta Platforms, Inc. and affiliates.
+    # Both implementations are licensed under Apache-2.0; see the repository LICENSE.
     def interpolate_pos_encoding(self, embeddings: torch.Tensor, height: int, width: int) -> torch.Tensor:
         """
         This method allows to interpolate the pre-trained position encodings, to be able to use the model on higher resolution

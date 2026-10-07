@@ -7,7 +7,7 @@ train_python() {
   if [[ -x "${_TRAIN_ROOT}/.venv/bin/python" ]]; then
     printf '%s\n' "${_TRAIN_ROOT}/.venv/bin/python"
   else
-    printf '%s\n' python
+    printf '%s\n' python3
   fi
 }
 
@@ -25,8 +25,20 @@ train_torchrun() {
 require_divisible_batch() {
   local config_name="$1"
   local num_gpus="$2"
-  local batch_size
+  shift 2
+  local batch_size arg next_is_batch=0
   batch_size="$("$(train_python)" -c 'import openpi.training.config as c, sys; print(c.get_config(sys.argv[1]).batch_size)' "${config_name}")"
+  for arg in "$@"; do
+    if (( next_is_batch )); then batch_size="${arg}"; next_is_batch=0; fi
+    case "${arg}" in
+      --batch-size|--batch_size) next_is_batch=1 ;;
+      --batch-size=*|--batch_size=*) batch_size="${arg#*=}" ;;
+    esac
+  done
+  (( next_is_batch == 0 )) || { echo "Missing batch size argument." >&2; return 1; }
+  [[ "${num_gpus}" =~ ^[1-9][0-9]*$ && "${batch_size}" =~ ^[1-9][0-9]*$ ]] || {
+    echo "NUM_GPUS and batch size must be positive integers." >&2; return 1;
+  }
   if (( num_gpus < 1 )) || (( batch_size % num_gpus != 0 )); then
     echo "Config ${config_name} uses batch_size=${batch_size}, which cannot be split across ${num_gpus} GPU(s)." >&2
     echo "Set NUM_GPUS to a divisor of ${batch_size}." >&2
@@ -38,7 +50,18 @@ download_stage_assets() {
   local stage="$1"
   local python_bin
   python_bin="$(train_python)"
-  "${python_bin}" "${_TRAIN_ROOT}/scripts/download_assets.py" --stage "${stage}" --checkpoint "${BASE_CHECKPOINT:-pi05_base}"
+  local extra_args=()
+  if [[ "${stage}" == 1 && -n "${STAGE1_INIT_WEIGHT:-}" ]]; then
+    extra_args+=(--skip-base-checkpoint)
+  fi
+  "${python_bin}" "${_TRAIN_ROOT}/scripts/download_assets.py" --stage "${stage}" --checkpoint "${BASE_CHECKPOINT:-pi05_base}" "${extra_args[@]}"
+}
+
+require_checkpoint_dir() {
+  [[ -f "$1/model.safetensors" ]] || {
+    echo "Checkpoint step directory must contain model.safetensors: $1" >&2
+    return 1
+  }
 }
 
 latest_checkpoint_dir() {
@@ -61,16 +84,29 @@ latest_checkpoint_dir() {
 
 default_num_gpus() {
   local detected
-  if [[ -n "${NUM_GPUS:-}" ]]; then
-    printf '%s\n' "${NUM_GPUS}"
-    return
+  detected="$("$(train_python)" -c 'import torch; print(torch.cuda.device_count())')"
+  if (( detected < 1 )); then
+    echo "No visible CUDA devices. Check CUDA_VISIBLE_DEVICES and the PyTorch installation." >&2
+    return 1
   fi
-  detected=1
-  if command -v nvidia-smi >/dev/null 2>&1; then
-    detected="$(nvidia-smi -L 2>/dev/null | wc -l | tr -d '[:space:]')"
-  fi
-  if [[ -z "${detected}" || "${detected}" -lt 1 ]]; then
-    detected=1
-  fi
-  printf '%s\n' "${detected}"
+  local selected="${NUM_GPUS:-${detected}}"
+  [[ "${selected}" =~ ^[1-9][0-9]*$ ]] && (( selected <= detected )) || {
+    echo "NUM_GPUS must be a positive integer no greater than the ${detected} visible CUDA device(s)." >&2
+    return 1
+  }
+  printf '%s\n' "${selected}"
+}
+
+require_pretraining_data() {
+  "$(train_python)" - "$1" <<'PYDATA'
+import pathlib, sys
+from openpi.training.config import get_config
+config = get_config(sys.argv[1])
+for spec in config.data.datasets:
+    roots = [spec.repo_id] if isinstance(spec.repo_id, str) else spec.repo_id
+    for root in roots:
+        path = pathlib.Path(root)
+        if not path.is_dir() or not any(path.rglob("meta/info.json")):
+            raise SystemExit(f"Missing converted {spec.dataset_type} data at {path}. Follow docs/pretraining.md before training.")
+PYDATA
 }

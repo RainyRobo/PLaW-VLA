@@ -1,67 +1,44 @@
+# Remote inference
 
-# Running PLaW-VLA remotely
+The policy server runs in the root environment on a GPU machine. Simulator and robot clients use the lightweight `openpi_client` package and the same WebSocket protocol.
 
-The policy server runs inference on a GPU machine and streams actions to a robot client over WebSocket. This keeps the robot environment separate from the training stack.
-
-## Starting a remote policy server
-
-Point the server at a PLaW-VLA checkpoint directory:
+## Server
 
 ```bash
-uv run scripts/serve_policy.py policy:checkpoint \
-  --policy.config=stage3_finetuning_libero \
-  --policy.dir=checkpoints/stage3_finetuning_libero/stage3_finetuning_libero/<step>
+.venv/bin/python scripts/serve_policy.py --env LIBERO --port 8001 policy:checkpoint \
+  --policy.config=stage3_finetuning_libero --policy.dir=/path/to/checkpoint/step
 ```
 
-This will start a policy server that will serve the policy specified by the `config` and `dir` arguments. The policy will be served on the specified port (default: 8001).
+Use a checkpoint with its original normalization assets and matching configuration. The server publishes an `input_spec` containing camera names, temporal offsets, state and prompt keys, and action/gripper conventions.
 
-## Querying the remote policy server from your robot code
+## Client
 
-We provide a client utility with minimal dependencies that you can easily embed into any robot codebase.
-
-First, install the `openpi-client` package in your robot environment:
+Install the client package into the simulator or robot environment:
 
 ```bash
-cd $PLAW_VLA_ROOT/packages/openpi-client
-pip install -e .
+pip install -e /path/to/PLaW-VLA/packages/openpi-client
 ```
-
-Then, you can use the client to query the remote policy server from your robot code. Here's an example of how to do this:
 
 ```python
-from openpi_client import image_tools
 from openpi_client import websocket_client_policy
 
-# Outside of episode loop, initialize the policy client.
-# Point to the host and port of the policy server (localhost and 8001 are the defaults).
 client = websocket_client_policy.WebsocketClientPolicy(host="localhost", port=8001)
+metadata = client.get_server_metadata()
+spec = metadata["input_spec"]
 
-for step in range(num_steps):
-    # Inside the episode loop, construct the observation.
-    # Resize images on the client side to minimize bandwidth / latency. Always return images in uint8 format.
-    # We provide utilities for resizing images + uint8 conversion so you match the training routines.
-    # The typical resize_size for pre-trained pi0 models is 224.
-    # Note that the proprioceptive `state` can be passed unnormalized, normalization will be handled on the server side.
-    observation = {
-        "observation/image": image_tools.convert_to_uint8(
-            image_tools.resize_with_pad(img, 224, 224)
-        ),
-        "observation/wrist_image": image_tools.convert_to_uint8(
-            image_tools.resize_with_pad(wrist_img, 224, 224)
-        ),
-        "observation/state": state,
-        "prompt": task_instruction,
-    }
-
-    # Call the policy server with the current observation.
-    # This returns an action chunk of shape (action_horizon, action_dim).
-    # Note that you typically only need to call the policy every N steps and execute steps
-    # from the predicted action chunk open-loop in the remaining steps.
-    action_chunk = client.infer(observation)["actions"]
-
-    # Execute the actions in the environment.
-    ...
-
+# Construct these values from the environment using the published spec.
+# LIBERO front_history is uint8 [T, H, W, 3] at history_step_offsets;
+# wrist_rgb is uint8 [H, W, 3]. state contains xyz, rotation-vector,
+# and two gripper finger positions, as described by state_gripper_format.
+observation = {
+    "observation/image": front_history,
+    "observation/wrist_image": wrist_rgb,
+    "observation/state": state,
+    "prompt": instruction,
+}
+actions = client.infer(observation)["actions"]
 ```
 
-Here, the `host` and `port` arguments specify the IP address and port of the remote policy server. You can also specify these as command-line arguments to your robot code, or hard-code them in your robot codebase. The `observation` is a dictionary of observations and the prompt, following the specification of the policy inputs for the policy you are serving. We have concrete examples of how to construct this dictionary for different environments in the [simple client example](../examples/simple_client/main.py).
+Images should match the training orientation and can be resized with `openpi_client.image_tools.resize_with_pad`. Normalization happens on the server. Construct temporal history at the published offsets rather than repeating a guessed number of frames. The [LIBERO client](../examples/libero/main.py) provides a complete implementation, including episode boundaries and action conversion.
+
+The response is an action chunk. Execute only the selected replanning window before sending the next observation. Interpret actions using the benchmark adapter and the published gripper contract; they are not a universal robot control format.

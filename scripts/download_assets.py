@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
+# Copyright 2026 PLaW-VLA authors. SPDX-License-Identifier: Apache-2.0
 """Download the base checkpoint, V-JEPA2 encoder, tokenizer, and LIBERO dataset.
 
-Each item is skipped when it is already on disk. ``--stage 2``, ``--stage 3``,
-and ``--stage all`` also compute normalization statistics for those stages.
+Each item is skipped when it is already on disk. ``--stage 3`` and
+``--stage all`` prepare LIBERO fine-tuning statistics. Pretraining data
+must be acquired and converted separately; see docs/pretraining.md.
 """
 
 from __future__ import annotations
@@ -18,7 +20,6 @@ import openpi.training.base_checkpoints as base_checkpoints
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 NORM_STATS_CONFIGS = {
-    "2": "stage2_pretraining",
     "3": "stage3_finetuning_libero",
 }
 
@@ -43,8 +44,7 @@ def ensure_dataset() -> pathlib.Path:
     snapshot_download(repo_id=repo_id, repo_type="dataset", local_dir=str(local_dir))
     if not _dataset_ready(local_dir):
         raise FileNotFoundError(
-            f"Downloaded {repo_id}, but {local_dir} is not a LeRobot dataset "
-            "(expected meta/info.json and data/)."
+            f"Downloaded {repo_id}, but {local_dir} is not a LeRobot dataset (expected meta/info.json and data/)."
         )
     return local_dir
 
@@ -118,25 +118,30 @@ def ensure_norm_stats(config_name: str) -> None:
         raise FileNotFoundError(f"Norm stats were not written to {stats_path}")
 
 
-def download_assets(stage: str, checkpoint_name: str) -> None:
-    ensure_dataset()
-    checkpoint_dir = ensure_base_checkpoint(checkpoint_name)
+def download_assets(stage: str, checkpoint_name: str, *, skip_base_checkpoint: bool = False) -> None:
+    if stage in {"3", "all"}:
+        ensure_dataset()
+    checkpoint_dir = (
+        ensure_base_checkpoint(checkpoint_name) if stage in {"1", "all"} and not skip_base_checkpoint else None
+    )
     ensure_vjepa2()
     ensure_paligemma_tokenizer()
-    if stage in {"2", "all"}:
-        ensure_norm_stats(NORM_STATS_CONFIGS["2"])
     if stage in {"3", "all"}:
         ensure_norm_stats(NORM_STATS_CONFIGS["3"])
-    logger.info("Stage I init checkpoint: %s", checkpoint_dir)
+    if checkpoint_dir is not None:
+        logger.info("Stage I init checkpoint: %s", checkpoint_dir)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--stage", choices=("1", "2", "3", "all"), default="1")
     parser.add_argument("--checkpoint", default="pi05_base", help="Name in openpi.training.base_checkpoints.")
+    parser.add_argument(
+        "--skip-base-checkpoint", action="store_true", help="Use an existing initialization checkpoint."
+    )
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    download_assets(args.stage, args.checkpoint)
+    download_assets(args.stage, args.checkpoint, skip_base_checkpoint=args.skip_base_checkpoint)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,7 @@
+# Derived from openpi (Copyright 2024 Physical Intelligence, Inc.; Apache-2.0).
+# Modified for PLaW-VLA by the PLaW-VLA authors, 2026.
+from collections.abc import Mapping
 import dataclasses
-import enum
 import logging
 import pathlib
 import time
@@ -14,15 +16,6 @@ import tyro
 logger = logging.getLogger(__name__)
 
 
-class EnvMode(enum.Enum):
-    """Supported environments."""
-
-    ALOHA = "aloha"
-    ALOHA_SIM = "aloha_sim"
-    DROID = "droid"
-    LIBERO = "libero"
-
-
 @dataclasses.dataclass
 class Args:
     """Command line arguments."""
@@ -30,15 +23,13 @@ class Args:
     # Host and port to connect to the server.
     host: str = "0.0.0.0"
     # Port of the policy server. serve_policy.py listens on 8001.
-    port: int | None = 8001
+    port: int = 8001
     # API key to use for the server.
     api_key: str | None = None
     # Number of steps to run the policy for.
     num_steps: int = 20
     # Path to save the timings to a parquet file. (e.g., timing.parquet)
     timing_file: pathlib.Path | None = None
-    # Environment to run the policy in.
-    env: EnvMode = EnvMode.ALOHA_SIM
 
 
 class TimingRecorder:
@@ -115,29 +106,27 @@ class TimingRecorder:
 
 
 def main(args: Args) -> None:
-    obs_fn = {
-        EnvMode.ALOHA: _random_observation_aloha,
-        EnvMode.ALOHA_SIM: _random_observation_aloha,
-        EnvMode.DROID: _random_observation_droid,
-        EnvMode.LIBERO: _random_observation_libero,
-    }[args.env]
+    if args.num_steps <= 0:
+        raise ValueError("num_steps must be positive.")
 
     policy = _websocket_client_policy.WebsocketClientPolicy(
         host=args.host,
         port=args.port,
         api_key=args.api_key,
     )
-    logger.info(f"Server metadata: {policy.get_server_metadata()}")
+    metadata = policy.get_server_metadata()
+    logger.info(f"Server metadata: {metadata}")
+    input_spec = _load_input_spec(metadata)
 
     # Send a few observations to make sure the model is loaded.
     for _ in range(2):
-        policy.infer(obs_fn())
+        policy.infer(_random_observation_libero(input_spec))
 
     timing_recorder = TimingRecorder()
 
     for _ in tqdm.trange(args.num_steps, desc="Running policy"):
         inference_start = time.time()
-        action = policy.infer(obs_fn())
+        action = policy.infer(_random_observation_libero(input_spec))
         timing_recorder.record("client_infer_ms", 1000 * (time.time() - inference_start))
         for key, value in action.get("server_timing", {}).items():
             timing_recorder.record(f"server_{key}", value)
@@ -150,36 +139,47 @@ def main(args: Args) -> None:
         timing_recorder.write_parquet(args.timing_file)
 
 
-def _random_observation_aloha() -> dict:
-    return {
-        "state": np.ones((14,)),
-        "images": {
-            "cam_high": np.random.randint(256, size=(3, 224, 224), dtype=np.uint8),
-            "cam_low": np.random.randint(256, size=(3, 224, 224), dtype=np.uint8),
-            "cam_left_wrist": np.random.randint(256, size=(3, 224, 224), dtype=np.uint8),
-            "cam_right_wrist": np.random.randint(256, size=(3, 224, 224), dtype=np.uint8),
-        },
-        "prompt": "do something",
-    }
+def _load_input_spec(metadata: dict) -> Mapping:
+    input_spec = metadata.get("input_spec")
+    if not isinstance(input_spec, Mapping):
+        raise ValueError("Server metadata must include 'input_spec'.")
+    if input_spec["family"] != "libero":
+        raise ValueError(f"The synthetic client requires a LIBERO policy, got {input_spec['family']!r}.")
+    if input_spec["state_gripper_format"] != "two_finger_qpos":
+        raise ValueError("The LIBERO policy must accept two_finger_qpos observations.")
+    if input_spec["action_gripper_format"] != "signed_command":
+        raise ValueError("The LIBERO policy must return signed_command gripper actions.")
+    image_keys = set(input_spec["image_keys"])
+    if not image_keys or not image_keys.issubset({"observation/image", "observation/wrist_image"}):
+        raise ValueError(f"Unsupported LIBERO image keys: {input_spec['image_keys']!r}.")
+    temporal_keys = set(input_spec["temporal_image_keys"])
+    if not temporal_keys.issubset(image_keys):
+        raise ValueError("Temporal image keys must be included in image_keys.")
+    offsets = input_spec["history_step_offsets"]
+    if temporal_keys and (not offsets or offsets[-1] != 0 or tuple(offsets) != tuple(sorted(set(offsets)))):
+        raise ValueError("History step offsets must be strictly increasing and end in zero.")
+    return input_spec
 
 
-def _random_observation_droid() -> dict:
-    return {
-        "observation/exterior_image_1_left": np.random.randint(256, size=(224, 224, 3), dtype=np.uint8),
-        "observation/wrist_image_left": np.random.randint(256, size=(224, 224, 3), dtype=np.uint8),
-        "observation/joint_position": np.random.rand(7),
-        "observation/gripper_position": np.random.rand(1),
-        "prompt": "do something",
-    }
-
-
-def _random_observation_libero() -> dict:
-    return {
-        "observation/state": np.random.rand(8),
-        "observation/image": np.random.randint(256, size=(224, 224, 3), dtype=np.uint8),
-        "observation/wrist_image": np.random.randint(256, size=(224, 224, 3), dtype=np.uint8),
-        "prompt": "do something",
-    }
+def _random_observation_libero(input_spec: Mapping) -> dict:
+    """Create raw LIBERO inputs, including every history frame requested by the server."""
+    temporal_keys = set(input_spec["temporal_image_keys"])
+    observation = {}
+    for key in input_spec["image_keys"]:
+        shape = (len(input_spec["history_step_offsets"]), 256, 256, 3) if key in temporal_keys else (224, 224, 3)
+        observation[key] = np.random.randint(256, size=shape, dtype=np.uint8)
+    if input_spec["state_key"] is not None:
+        finger_opening = np.random.uniform(0.0, 0.04)
+        observation[input_spec["state_key"]] = np.concatenate(
+            (
+                np.random.uniform([0.3, -0.2, 0.1], [0.6, 0.2, 0.4]),
+                np.random.uniform(-0.2, 0.2, size=3),
+                [finger_opening, -finger_opening],
+            )
+        ).astype(np.float32)
+    if input_spec["prompt_key"] is not None:
+        observation[input_spec["prompt_key"]] = "pick up the object"
+    return observation
 
 
 if __name__ == "__main__":

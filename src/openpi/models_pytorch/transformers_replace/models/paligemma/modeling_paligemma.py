@@ -1,3 +1,5 @@
+# Derived from openpi (Copyright 2024 Physical Intelligence, Inc.; Apache-2.0).
+# Modified for PLaW-VLA by the PLaW-VLA authors, 2026.
 # coding=utf-8
 # Copyright 2024 the HuggingFace Inc. team. All rights reserved.
 #

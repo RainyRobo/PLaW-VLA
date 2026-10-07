@@ -1,3 +1,5 @@
+# Derived from openpi (Copyright 2024 Physical Intelligence, Inc.; Apache-2.0).
+# Modified for PLaW-VLA by the PLaW-VLA authors, 2026.
 import dataclasses
 import logging
 import os
@@ -23,7 +25,6 @@ def create_trained_policy(
     default_prompt: str | None = None,
     norm_stats: dict[str, transforms.NormStats] | None = None,
     pytorch_device: str | None = None,
-    allow_legacy_norm_stats: bool = False,
 ) -> _policy.Policy:
     """Create a policy from a trained checkpoint.
 
@@ -42,7 +43,7 @@ def create_trained_policy(
 
     Note:
         The function automatically detects whether the model is PyTorch-based by checking for the
-        presence of "model.safensors" in the checkpoint directory.
+    presence of "model.safetensors" in the checkpoint directory.
     """
     repack_transforms = repack_transforms or transforms.Group()
     checkpoint_dir = download.maybe_download(str(checkpoint_dir))
@@ -55,6 +56,7 @@ def create_trained_policy(
     if is_pytorch and pytorch_device is None:
         try:
             import torch
+
             pytorch_device = "cuda" if torch.cuda.is_available() else "cpu"
         except ImportError:
             pytorch_device = "cpu"
@@ -91,7 +93,7 @@ def create_trained_policy(
         norm_stats = _checkpoints.load_norm_stats(
             checkpoint_dir / "assets",
             data_config.asset_id,
-            expected_contract=None if allow_legacy_norm_stats else data_config.normalization_contract,
+            expected_contract=data_config.normalization_contract,
         )
 
     return _policy.Policy(

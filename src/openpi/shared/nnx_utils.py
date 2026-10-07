@@ -1,3 +1,5 @@
+# Derived from openpi (Copyright 2024 Physical Intelligence, Inc.; Apache-2.0).
+# Modified for PLaW-VLA by the PLaW-VLA authors, 2026.
 from collections.abc import Callable
 import dataclasses
 import functools
@@ -15,15 +17,10 @@ R = TypeVar("R")
 def module_jit(meth: Callable[P, R], *jit_args, **jit_kwargs) -> Callable[P, R]:
     """A higher-order function to JIT-compile `nnx.Module` methods, freezing the module's state in the process.
 
-    Why not `nnx.jit`? For some reason, naively applying `nnx.jit` to `nnx.Module` methods, bound or unbound, uses much
-    more memory than necessary. I'm guessing it has something to do with the fact that it must keep track of module
-    mutations. Also, `nnx.jit` has some inherent overhead compared to a standard `jax.jit`, since every call must
-    traverse the NNX module graph. See https://github.com/google/flax/discussions/4224 for details.
-
-    `module_jit` is an alternative that avoids these issues by freezing the module's state. The function returned by
-    `module_jit` acts exactly like the original method, except that the state of the module is frozen to whatever it was
-    when `module_jit` was called. Mutations to the module within `meth` are still allowed, but they will be discarded
-    after the method call completes.
+    The returned function uses the module state captured when `module_jit` is
+    called. It runs the bound method through `jax.jit` without traversing the
+    NNX module graph on each call. Mutations within `meth` are discarded after
+    the call, so this helper is intended for inference with fixed parameters.
     """
     if not (inspect.ismethod(meth) and isinstance(meth.__self__, nnx.Module)):
         raise ValueError("module_jit must only be used on bound methods of nnx.Modules.")

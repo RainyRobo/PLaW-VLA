@@ -1,3 +1,15 @@
-.venv
+.git
+**/.git
+**/.venv
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+third_party
 checkpoints
 data
+results
+logs
+wandb
+assets/*/
+*.log
+.codex

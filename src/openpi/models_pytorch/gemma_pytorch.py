@@ -1,3 +1,5 @@
+# Derived from openpi (Copyright 2024 Physical Intelligence, Inc.; Apache-2.0).
+# Modified for PLaW-VLA by the PLaW-VLA authors, 2026.
 from typing import Any
 from typing import Literal
 
@@ -674,8 +676,6 @@ class PaliGemmaWithExpertModel(nn.Module):
                     inputs_embeds = compute_layer_complete(
                         layer_idx, inputs_embeds, attention_mask, position_ids, adarms_cond
                     )
-
-                # Old code removed - now using compute_layer_complete function above
 
             # final norm
             # Define final norm computation function for gradient checkpointing

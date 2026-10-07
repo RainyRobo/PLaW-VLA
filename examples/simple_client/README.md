@@ -1,30 +1,11 @@
-# Simple Client
+# Simple policy client
 
-A minimal client that sends observations to the server and prints the inference rate.
+This example measures inference timing using synthetic LIBERO observations and the server's temporal sampling metadata. It does not execute a simulator task.
 
-You can specify which runtime environment to use using the `--env` flag. You can see the available options by running:
-
-```bash
-uv run examples/simple_client/main.py --help
-```
-
-## With Docker
+Start a LIBERO policy server as described in [the root README](../../README.md#libero-evaluation), then run from the repository root:
 
 ```bash
-export SERVER_ARGS="--env ALOHA_SIM"
-docker compose -f examples/simple_client/compose.yml up --build
+.venv/bin/python examples/simple_client/main.py --host localhost --port 8001 --num-steps 20
 ```
 
-## Without Docker
-
-Terminal window 1:
-
-```bash
-uv run examples/simple_client/main.py --env DROID
-```
-
-Terminal window 2:
-
-```bash
-uv run scripts/serve_policy.py --env DROID
-```
+Use `--timing-file /path/to/timing.parquet` to save timing samples. For real evaluation, use [the LIBERO client](../libero/README.md). To embed the WebSocket client in another Python environment, follow [remote inference](../../docs/remote_inference.md).

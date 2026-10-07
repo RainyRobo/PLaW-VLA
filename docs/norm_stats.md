@@ -1,26 +1,30 @@
-# Normalization statistics
+# Normalization and action conventions
 
-Training normalizes proprioceptive state and action targets with statistics computed on the dataset for that config. Inference loads the same file from the checkpoint's `assets/` directory.
+Training normalizes state and action targets using statistics computed after the recipe's data transforms. Inference must load the same statistics and action convention from the checkpoint's `assets/` directory.
 
-## Where they live
+## Computing statistics
 
-`scripts/download_assets.py` runs `scripts/compute_norm_stats.py` for Stage II and Stage III before those stages start. The files are written to:
-
-```
-assets/<config_name>/libero_v3_eef/norm_stats.json
-```
-
-Stage I does not load norm stats, because it trains the world model without actions. Stage II and Stage III use different action windows (`action_time_start_s` is `0.1` in Stage II and `0.0` in Stage III), so each config keeps its own file. Do not copy a short smoke-run statistic into the release; recompute it on the full dataset.
-
-## Computing them yourself
+After preparing the local mixture, run:
 
 ```bash
-uv run python scripts/compute_norm_stats.py --config-name stage2_pretraining
-uv run python scripts/compute_norm_stats.py --config-name stage3_finetuning_libero
+.venv/bin/python scripts/compute_norm_stats.py --config-name stage2_pretraining
+.venv/bin/python scripts/compute_norm_stats.py --config-name stage3_finetuning_libero
 ```
 
-The asset id comes from the data config (`libero_v3_eef` for the released recipe). A new dataset should set `AssetsConfig(asset_id=...)` to a relative id, then run the same script with that config name. If `asset_id` is omitted, the repo id is used. An absolute local path is stored with the leading slash removed, so `/data/my_robot` lands at `assets/<config>/data/my_robot/` and the same relative path is copied into the checkpoint.
+The first command expands all four Stage II sources and their child datasets. Each child gets statistics under `assets/<config>/<asset_id>/norm_stats.json`. The Stage III wrapper prepares its LIBERO dataset and computes `assets/stage3_finetuning_libero/libero_v3_eef/norm_stats.json` automatically. Stage I uses video supervision and does not require action statistics.
 
-## LIBERO end-effector actions
+Asset IDs are relative checkpoint paths. A local absolute dataset root is normalized by removing its leading slash; a dataset may instead declare a stable `AssetsConfig(asset_id=...)`. The training checkpoint saves all required statistics under its `assets/` subtree.
 
-The released LIBERO configs use an 8D end-effector action. State gripper values are physical widths. Training actions are stored as absolute physical widths, then converted to deltas from the current end-effector state. Every step in the action chunk uses that same state: position and gripper are subtracted from it, and orientation is the quaternion rotation from the current orientation. The contract is recorded next to `norm_stats.json` so a checkpoint cannot be served against a different gripper convention.
+Converter statistics describe stored raw features. Recompute training statistics with `compute_norm_stats.py` whenever the action representation, time sampling, or dataset changes. `--max-frames` can limit a local experiment; use the full training data for the final training statistics.
+
+## EEF representations
+
+Canonical EEF poses use position plus a scalar-first quaternion (`qw, qx, qy, qz`). A single arm with one gripper value has 8 dimensions; a dual-arm pose has 16. Adapters retain declared joint-space layouts where a source dataset provides joint targets instead of EEF poses.
+
+For EEF action training, every target in a chunk is expressed relative to the **same current observation state**: position and gripper are subtracted from that state, and orientation uses the rotation from its current quaternion. The output transform reconstructs absolute targets from that same state before benchmark-specific controller conversion.
+
+The Stage III LIBERO EEF dataset stores physical gripper widths. Its adapter canonicalizes them before the delta transform and records the convention in a normalization contract alongside the statistics. Raw LIBERO signed controller commands are a different representation and require an explicitly matching data config. Do not mix widths, open fractions, or signed commands without the corresponding adapter.
+
+## Loading a checkpoint
+
+Use the checkpoint's original normalization statistics, action/gripper conventions, model dimensions, and temporal schedule. A step directory should include `model.safetensors` and its saved `assets/`; optimizer and training-state files are also needed for a training resume. Select the matching configuration with `--policy.config` when serving.

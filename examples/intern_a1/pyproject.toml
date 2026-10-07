@@ -1,0 +1,26 @@
+[project]
+name = "intern-a1"
+version = "0.1.0"
+description = "InternData-A1 extraction and normalization tooling for openpi"
+requires-python = ">=3.12"
+dependencies = [
+    "chex",
+    "lerobot",
+    "numpy",
+    "numpydantic>=1.6.6",
+    "pydantic>=2.11.0",
+    "pyarrow",
+    "pynvml",
+    "pytest",
+    "ray",
+    "rich>=14.0.0",
+    "tqdm",
+    "tyro",
+]
+
+[tool.uv]
+no-build-package = ["av"]
+override-dependencies = ["av>=15.0.0"]
+
+[tool.uv.sources]
+lerobot = { git = "https://github.com/huggingface/lerobot", rev = "017ff73fbfe46bf9a673cd9b402988dcb79151f7" }

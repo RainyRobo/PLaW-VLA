@@ -1,28 +1,29 @@
-"""
-PyTorch training entrypoint for PI0/PI05 with multi-GPU and multi-node (DDP) support.
-This script trains PLaW-VLA with PyTorch. It runs
-entirely in PyTorch using the `PI0Pytorch` model and your existing config/data
-pipeline from `src/openpi/training/config.py` and `src/openpi/training/data_loader.py`.
+# Derived from openpi (Copyright 2024 Physical Intelligence, Inc.; Apache-2.0).
+# Modified for PLaW-VLA by the PLaW-VLA authors, 2026.
+"""Train PLaW-VLA with PyTorch on one GPU or with distributed data parallelism.
 
-Usage
-Single GPU:
-  python scripts/train_pytorch.py <config_name> --exp_name <run_name> --save_interval <interval>
-  Example:
-  python scripts/train_pytorch.py debug --exp_name pytorch_ddp_test
-  python scripts/train_pytorch.py debug --exp_name pytorch_ddp_test --resume  # Resume from latest checkpoint
-Multi-GPU (single node):
-  torchrun --standalone --nnodes=1 --nproc_per_node=<num_gpus> scripts/train_pytorch.py <config_name> --exp_name <run_name>
-  Example:
-  torchrun --standalone --nnodes=1 --nproc_per_node=2 scripts/train_pytorch.py stage1_world_model_pretraining --exp_name pytorch_ddp_test
-  torchrun --standalone --nnodes=1 --nproc_per_node=2 scripts/train_pytorch.py stage1_world_model_pretraining --exp_name pytorch_ddp_test --resume
-Multi-Node Training:
-	torchrun \
-    --nnodes=<num_nodes> --nproc_per_node=<gpus_per_node> --node_rank=<rank_of_node> \
-    --master_addr=<master_ip> --master_port=<port> \
-    scripts/train_pytorch.py <config_name> --exp_name=<run_name> --save_interval <interval>
-    Example (6 GPUs on single node):
-    uv run torchrun --nnodes=1 --nproc_per_node=8 scripts/train_pytorch.py stage3_finetuning_libero --exp_name my_experiment --checkpoint_base_dir ./checkpoints
+Training and data settings come from ``openpi.training.config``. The stage
+wrappers prepare the required assets; direct invocations expect them to exist.
 
+Run the small synthetic-data configuration on one GPU::
+
+    uv run scripts/train_pytorch.py debug_pi05 --exp-name example
+
+Resume that run with overwriting disabled::
+
+    uv run scripts/train_pytorch.py debug_pi05 --exp-name example --resume --no-overwrite
+
+For multiple GPUs on one node, launch one process per visible GPU::
+
+    uv run torchrun --standalone --nnodes=1 --nproc-per-node=<num_gpus> \
+        scripts/train_pytorch.py <config_name> --exp-name <run_name>
+
+For multiple nodes, use the same master address and port on every node, with a
+distinct ``--node-rank`` for each::
+
+    uv run torchrun --nnodes=<num_nodes> --nproc-per-node=<gpus_per_node> \
+        --node-rank=<node_rank> --master-addr=<master_ip> --master-port=<port> \
+        scripts/train_pytorch.py <config_name> --exp-name <run_name>
 """
 
 import dataclasses

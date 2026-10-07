@@ -30,7 +30,7 @@ def _load_one_sample(
 
 
 def _maybe_limit_repo_ids_for_smoke_test(data_config: _config.DataConfig) -> _config.DataConfig:
-    max_repo_ids = os.getenv("PLAW_VLA_MANUAL_TEST_MAX_REPO_IDS_PER_CONFIG")
+    max_repo_ids = os.getenv("MANUAL_TEST_MAX_REPO_IDS_PER_CONFIG")
     if not max_repo_ids:
         return data_config
 

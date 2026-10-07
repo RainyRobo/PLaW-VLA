@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert the official π₀.₅ JAX checkpoint to PLaW-VLA's PyTorch format.
+r"""Convert the official π₀.₅ JAX checkpoint to PLaW-VLA's PyTorch format.
 
 Normally ``scripts/download_assets.py`` invokes this automatically. It can also be run
 directly:

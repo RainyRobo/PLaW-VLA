@@ -1,3 +1,5 @@
+# Derived from openpi (Copyright 2024 Physical Intelligence, Inc.; Apache-2.0).
+# Modified for PLaW-VLA by the PLaW-VLA authors, 2026.
 """Compute normalization statistics for a config.
 
 This script is used to compute the normalization statistics for a given config. It
@@ -77,7 +79,10 @@ def _resolve_norm_stats_inputs(
     effective_batch_size = config.batch_size if batch_size is None else batch_size
 
     data_factory = dataclasses.replace(config.data, load_norm_stats=False)
-    root_data_configs = [data_factory.create(config.assets_dirs, stats_model_config)]
+    if isinstance(data_factory, _config.MultiDatasetPretrainDataConfig):
+        root_data_configs = [data_config for data_config, _ in data_factory.create_all(config.assets_dirs, stats_model_config)]
+    else:
+        root_data_configs = [data_factory.create(config.assets_dirs, stats_model_config)]
 
     expanded_data_configs: list[_config.DataConfig] = []
     for data_config in root_data_configs:

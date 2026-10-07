@@ -192,8 +192,15 @@ def test_released_stage_configs_load():
     )
     for name in names:
         train_cfg = _config.get_config(name)
-        assert isinstance(train_cfg.data, _config.LeRobotLiberoDataConfig)
-        assert train_cfg.data.repo_id == "data/libero_v3_eef"
+        if name == "stage3_finetuning_libero":
+            assert isinstance(train_cfg.data, _config.LeRobotLiberoDataConfig)
+            assert train_cfg.data.repo_id == "data/libero_v3_eef"
+        else:
+            assert isinstance(train_cfg.data, _config.MultiDatasetPretrainDataConfig)
+            expected = {"intern_a1", "agibot", "robotwin", "libero"}
+            if name == "stage1_world_model_pretraining":
+                expected.add("egodex")
+            assert {spec.dataset_type for spec in train_cfg.data.datasets} == expected
         assert train_cfg.data.base_config.world_model.time_offsets_s == _config._LIBERO_TIME_OFFSETS_S
         assert train_cfg.data.base_config.world_model.history_num_frames == 6
         assert train_cfg.data.base_config.world_model.future_num_frames == 6
@@ -204,7 +211,8 @@ def test_stage1_world_model_pretraining_uses_static_graph_after_freezing_unused_
 
     assert train_cfg.ddp_find_unused_parameters is False
     assert train_cfg.ddp_static_graph is True
-    assert train_cfg.data.pretrain_world_model is True
+    assert isinstance(train_cfg.data, _config.MultiDatasetPretrainDataConfig)
+    assert train_cfg.data.use_canonical_delta_actions is False
     assert train_cfg.data.load_norm_stats is False
     assert train_cfg.model.wm_loss_dropout_alpha == 0.0
     assert train_cfg.lr_schedule.decay_lr == train_cfg.lr_schedule.peak_lr
@@ -215,7 +223,7 @@ def test_stage2_pretraining_keeps_default_ddp_flags_for_dynamic_wm_dropout():
 
     assert train_cfg.ddp_find_unused_parameters is True
     assert train_cfg.ddp_static_graph is None
-    assert train_cfg.data.use_canonical_ee_delta is True
+    assert train_cfg.data.use_canonical_delta_actions is True
     assert train_cfg.model.wm_loss_dropout_alpha == 0.3
 
 

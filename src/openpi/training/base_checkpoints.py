@@ -1,3 +1,4 @@
+# Copyright 2026 PLaW-VLA authors. SPDX-License-Identifier: Apache-2.0
 """Public base checkpoints.
 
 Add another π₀.₅ JAX checkpoint by appending one entry, then select it with
@@ -38,7 +39,7 @@ BASE_CHECKPOINTS: dict[str, BaseCheckpoint] = {
     ),
 }
 
-# LeRobot dataset used by the released three-stage recipe.
+# LeRobot dataset used for Stage III LIBERO fine-tuning.
 DEFAULT_DATASET_REPO = "RainyBot/libero_v3_eef"
 DEFAULT_DATASET_DIR = "data/libero_v3_eef"
 VJEPA2_REPO = "facebook/vjepa2-vitl-fpc64-256"

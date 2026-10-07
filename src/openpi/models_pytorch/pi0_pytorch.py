@@ -1,3 +1,5 @@
+# Derived from openpi (Copyright 2024 Physical Intelligence, Inc.; Apache-2.0).
+# Modified for PLaW-VLA by the PLaW-VLA authors, 2026.
 import logging
 import math
 import os
@@ -326,7 +328,7 @@ class PI0Pytorch(nn.Module):
             self.world_model_adapter.encoder_module.to(dtype=torch.float32)
 
         torch.set_float32_matmul_precision("high")
-        compile_mode = os.environ.get("PLAW_VLA_TORCH_COMPILE_MODE", "max-autotune")
+        compile_mode = os.environ.get("TORCH_COMPILE_MODE", "max-autotune")
         logging.info("Compiling PI0Pytorch.sample_actions with torch.compile(mode=%s)", compile_mode)
         self.sample_actions = torch.compile(self.sample_actions, mode=compile_mode)
 

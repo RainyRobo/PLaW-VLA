@@ -175,3 +175,6 @@ cython_debug/
 #codex-files
 .codex
 .codex/
+
+# Generated normalization assets; the teaser remains tracked.
+assets/*/

@@ -9,7 +9,7 @@ import openpi.shared.download as download
 def set_plaw_vla_data_home(tmp_path_factory):
     temp_dir = tmp_path_factory.mktemp("plaw_vla_data")
     with pytest.MonkeyPatch().context() as mp:
-        mp.setenv("PLAW_VLA_DATA_HOME", str(temp_dir))
+        mp.setenv("DATA_HOME", str(temp_dir))
         yield
 
 

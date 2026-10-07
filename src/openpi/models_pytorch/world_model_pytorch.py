@@ -1,3 +1,4 @@
+# Copyright 2026 PLaW-VLA authors. SPDX-License-Identifier: Apache-2.0
 """World Model (V-JEPA2) integration for PI0 policy."""
 
 import logging
@@ -358,7 +359,7 @@ class VJepa2Adapter(nn.Module):
             video_frames: Batched video frames ``(B, T, H, W, C)``. Accepts either
                 float-valued tensors normalized to ``[-1, 1]`` (the convention used by
                 the rest of the policy pipeline) or pre-converted ``uint8`` tensors in
-                ``[0, 255]`` (legacy callers). Floats are converted to ``uint8`` here so
+                ``[0, 255]``. Floats are converted to ``uint8`` here so
                 callers do not need to know about the V-JEPA HuggingFace processor's
                 preferred input format.
             skip_predictor: Whether to skip V-JEPA2 predictor head (use encoder only)

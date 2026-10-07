@@ -313,20 +313,20 @@ def test_with_fake_dataset():
 
 
 def test_default_lerobot_video_backend_prefers_env_override(monkeypatch):
-    monkeypatch.setenv("PLAW_VLA_LEROBOT_VIDEO_BACKEND", "pyav")
+    monkeypatch.setenv("LEROBOT_VIDEO_BACKEND", "pyav")
 
     assert _data_loader._default_lerobot_video_backend() == "pyav"
 
 
 def test_default_lerobot_video_backend_prefers_pyav_when_unset(monkeypatch):
-    monkeypatch.delenv("PLAW_VLA_LEROBOT_VIDEO_BACKEND", raising=False)
+    monkeypatch.delenv("LEROBOT_VIDEO_BACKEND", raising=False)
     monkeypatch.setattr(_data_loader, "_torchcodec_decoder_available", lambda: True)
 
     assert _data_loader._default_lerobot_video_backend() == "pyav"
 
 
 def test_default_lerobot_video_backend_falls_back_to_pyav(monkeypatch):
-    monkeypatch.delenv("PLAW_VLA_LEROBOT_VIDEO_BACKEND", raising=False)
+    monkeypatch.delenv("LEROBOT_VIDEO_BACKEND", raising=False)
     monkeypatch.setattr(_data_loader, "_torchcodec_decoder_available", lambda: False)
 
     assert _data_loader._default_lerobot_video_backend() == "pyav"
@@ -375,7 +375,7 @@ def test_install_torchvision_video_warning_filter(monkeypatch):
 
 def test_fault_tolerant_dataset_skips_retryable_bad_sample_and_logs(monkeypatch, tmp_path):
     log_path = tmp_path / "bad_samples.log"
-    monkeypatch.setenv("PLAW_VLA_BAD_SAMPLE_LOG_PATH", str(log_path))
+    monkeypatch.setenv("BAD_SAMPLE_LOG_PATH", str(log_path))
     monkeypatch.setattr(_data_loader, "_BAD_SAMPLE_LOGGED_SIGNATURES", set())
     monkeypatch.setattr(_data_loader, "_BAD_SAMPLE_INDEX_BLACKLIST", {})
     monkeypatch.setattr(_data_loader, "_BAD_VIDEO_PATH_BLACKLIST", set())
@@ -424,7 +424,7 @@ def test_fault_tolerant_dataset_propagates_non_retryable_errors(monkeypatch):
 
 def test_fault_tolerant_dataset_can_skip_any_read_error_when_enabled(monkeypatch, tmp_path):
     log_path = tmp_path / "bad_samples.log"
-    monkeypatch.setenv("PLAW_VLA_BAD_SAMPLE_LOG_PATH", str(log_path))
+    monkeypatch.setenv("BAD_SAMPLE_LOG_PATH", str(log_path))
     monkeypatch.setattr(_data_loader, "_BAD_SAMPLE_LOGGED_SIGNATURES", set())
     monkeypatch.setattr(_data_loader, "_BAD_SAMPLE_INDEX_BLACKLIST", {})
     monkeypatch.setattr(_data_loader, "_BAD_VIDEO_PATH_BLACKLIST", set())
@@ -458,7 +458,7 @@ def test_fault_tolerant_dataset_can_skip_any_read_error_when_enabled(monkeypatch
 
 def test_fault_tolerant_dataset_blacklists_bad_video_paths(monkeypatch, tmp_path):
     log_path = tmp_path / "bad_samples.log"
-    monkeypatch.setenv("PLAW_VLA_BAD_SAMPLE_LOG_PATH", str(log_path))
+    monkeypatch.setenv("BAD_SAMPLE_LOG_PATH", str(log_path))
     monkeypatch.setattr(_data_loader, "_BAD_SAMPLE_LOGGED_SIGNATURES", set())
     monkeypatch.setattr(_data_loader, "_BAD_SAMPLE_INDEX_BLACKLIST", {})
     monkeypatch.setattr(_data_loader, "_BAD_VIDEO_PATH_BLACKLIST", set())
@@ -516,7 +516,7 @@ def test_sync_bad_sample_blacklist_from_log(monkeypatch, tmp_path):
         "error_type=RuntimeError\tvideo_paths=('/tmp/bad.mp4', '/tmp/other.mp4')\tmessage='broken'\n",
         encoding="utf-8",
     )
-    monkeypatch.setenv("PLAW_VLA_BAD_SAMPLE_LOG_PATH", str(log_path))
+    monkeypatch.setenv("BAD_SAMPLE_LOG_PATH", str(log_path))
     monkeypatch.setattr(_data_loader, "_BAD_SAMPLE_INDEX_BLACKLIST", {})
     monkeypatch.setattr(_data_loader, "_BAD_VIDEO_PATH_BLACKLIST", set())
     monkeypatch.setattr(_data_loader, "_BAD_SAMPLE_LOG_SYNC_STATE", {})
@@ -536,8 +536,8 @@ def test_fault_tolerant_dataset_imports_external_bad_shard_log(monkeypatch, tmp_
         f"error_type=RuntimeError\tvideo_paths=('{bad_shard}',)\tmessage='broken'\n",
         encoding="utf-8",
     )
-    monkeypatch.setenv("PLAW_VLA_BAD_SAMPLE_LOG_PATH", str(log_path))
-    monkeypatch.setenv("PLAW_VLA_BAD_SAMPLE_LOG_SYNC_INTERVAL_S", "0")
+    monkeypatch.setenv("BAD_SAMPLE_LOG_PATH", str(log_path))
+    monkeypatch.setenv("BAD_SAMPLE_LOG_SYNC_INTERVAL_S", "0")
     monkeypatch.setattr(_data_loader, "_BAD_SAMPLE_LOGGED_SIGNATURES", set())
     monkeypatch.setattr(_data_loader, "_BAD_SAMPLE_INDEX_BLACKLIST", {})
     monkeypatch.setattr(_data_loader, "_BAD_VIDEO_PATH_BLACKLIST", set())

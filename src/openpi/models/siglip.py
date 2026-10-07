@@ -1,3 +1,4 @@
+# Modified for PLaW-VLA by the PLaW-VLA authors (2026).
 # Copyright 2024 Big Vision Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -208,8 +209,7 @@ class _Module(nn.Module):
     def __call__(self, image, *, train=False):
         out = {}
 
-        # Kevin edit: do patch extraction and posemb in float32,
-        # because I feel like it's a bit safer.
+        # Compute patch extraction and positional embeddings in float32.
         image = jnp.asarray(image, jnp.float32)
 
         # Patch extraction
@@ -235,7 +235,7 @@ class _Module(nn.Module):
         n, _, c = x.shape  # n,l,d
         x = nn.Dropout(rate=self.dropout)(x, not train)
 
-        # Kevin edit: now cast back to dtype_mm (potentially half precision)
+        # Preserve the matrix-multiplication dtype, including half precision.
         x = x.astype(self.dtype_mm)
 
         x, out["encoder"] = Encoder(

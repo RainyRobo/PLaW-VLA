@@ -47,92 +47,119 @@
   <img src="assets/teaser.png" alt="Overview of PLaW-VLA and its evaluation results" width="100%">
 </p>
 
+PLaW-VLA predicts future visual representations in a pretrained V-JEPA 2 latent space and conditions an action expert on those predictions. The three-stage recipe learns latent prediction from human and robot videos, jointly trains prediction and action generation on robot trajectories, and fine-tunes the policy for downstream tasks.
+
+This repository provides the model, training pipeline, data preparation tools, and a WebSocket policy server. **LIBERO is the supported benchmark.** Optional RoboTwin and LIBERO-Plus clients are available for research use; support for both remains planned. The `openpi` and `openpi_client` package names follow the upstream implementation.
+
 ## Installation
 
-Install [uv](https://docs.astral.sh/uv/getting-started/installation/):
+Use Linux with an NVIDIA GPU and a driver compatible with CUDA 12.8. Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then run:
 
 ```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
-
-```bash
-git clone --recurse-submodules https://github.com/RainyRobo/PLaW-VLA.git
+git clone https://github.com/RainyRobo/PLaW-VLA.git
 cd PLaW-VLA
-
-GIT_LFS_SKIP_SMUDGE=1 uv sync --python 3.12
-GIT_LFS_SKIP_SMUDGE=1 uv pip install -e .
+git submodule update --init third_party/libero
+GIT_LFS_SKIP_SMUDGE=1 uv sync --python 3.12 --frozen
 bash scripts/install_transformers_patch.sh
 ```
 
-`uv` installs the required Python version and CUDA-enabled packages. An NVIDIA GPU and a compatible driver are required. Run the last command again after every subsequent `uv sync`.
+The training and policy environment uses PyTorch with CUDA 12.8. The patch installer checks the pinned Transformers version and installs the PLaW-VLA changes only in the project virtual environment. Run it again after synchronizing or recreating that environment. Conversion tools and simulator clients use separate environments.
 
-## Downloading Assets
+## Models and data
 
-Download all required weights and data with one command:
+PLaW-VLA checkpoints are **pending release**. Until then, evaluation requires a checkpoint trained with this repository, including its original `assets/` directory and matching training configuration. The upstream π₀.₅ checkpoint initializes Stage I; it is not a PLaW-VLA evaluation checkpoint.
+
+| Resource | Source | Use |
+| --- | --- | --- |
+| π₀.₅ base | `gs://openpi-assets/checkpoints/pi05_base` | Stage I initialization, converted to PyTorch |
+| V-JEPA 2 encoder | [facebook/vjepa2-vitl-fpc64-256](https://huggingface.co/facebook/vjepa2-vitl-fpc64-256) | Visual latent targets |
+| PaliGemma tokenizer | `gs://big_vision/paligemma_tokenizer.model` | Language input |
+| LIBERO EEF data | [RainyBot/libero_v3_eef](https://huggingface.co/datasets/RainyBot/libero_v3_eef) | LIBERO fine-tuning |
 
 ```bash
-uv run python scripts/download_assets.py --stage all
+# Base models and tokenizer for Stage I.
+.venv/bin/python scripts/download_assets.py --stage 1
+# LIBERO fine-tuning data, encoder, tokenizer, and normalization statistics.
+.venv/bin/python scripts/download_assets.py --stage 3
 ```
 
-| Asset | Source | Local path |
-| --- | --- | --- |
-| π<sub>0.5</sub> base checkpoint, converted to PyTorch | `gs://openpi-assets/checkpoints/pi05_base` | `checkpoints/pi05_base_pytorch/` |
-| V-JEPA2 encoder | [`facebook/vjepa2-vitl-fpc64-256`](https://huggingface.co/facebook/vjepa2-vitl-fpc64-256) | Hugging Face cache |
-| PaliGemma tokenizer | `gs://big_vision/paligemma_tokenizer.model` | `~/.cache/plaw-vla/` |
-| LIBERO dataset | [`RainyBot/libero_v3_eef`](https://huggingface.co/datasets/RainyBot/libero_v3_eef) | `data/libero_v3_eef/` |
-| Normalization statistics | Computed from the dataset | `assets/<config>/libero_v3_eef/` |
+Downloads are cached and existing resources are reused. **The pretraining mixture is not distributed.** Obtain its five source datasets under their respective terms and follow [the data guide](docs/data.md) to prepare local LeRobot datasets.
 
-Existing files are skipped. The training scripts run the same step automatically, so this command is optional.
+## Pretraining
 
-## Training
-
-Run the three stages in order. Stage II continues from the latest Stage I checkpoint, and Stage III from the latest Stage II checkpoint.
+[The pretraining guide](docs/pretraining.md) covers the data layout, Stage I and Stage II recipes, normalization, and checkpoint handoff. Set `DATA_ROOT` to the converted data root; the default is `data/pretrain/` in this repository.
 
 ```bash
+.venv/bin/python scripts/compute_norm_stats.py --config-name stage2_pretraining
 bash scripts/run_stage1_world_model_pretraining.sh
 bash scripts/run_stage2_pretraining.sh
+```
+
+The stages use the configuration names `stage1_world_model_pretraining`, `stage2_pretraining`, and `stage3_finetuning_libero`. The wrappers accept additional training arguments and use the visible CUDA devices. `NUM_GPUS` must not exceed the visible device count and must divide the total batch size.
+
+## LIBERO fine-tuning
+
+Stage III starts from a completed Stage II checkpoint. For example:
+
+```bash
+STAGE3_INIT_WEIGHT=/path/to/stage2/checkpoint/step \
+EXP_NAME=libero \
 bash scripts/run_stage3_finetuning_libero.sh
 ```
 
-`NUM_GPUS` defaults to the number of visible GPUs and must divide the batch size. Checkpoints are written to `checkpoints/<config>/<config>/<step>/`. Logs go to the Weights & Biases project `plaw-vla`; run `wandb login` before training.
+Without `STAGE3_INIT_WEIGHT`, the wrapper finds the latest numeric checkpoint under `checkpoints/stage2_pretraining/stage2_pretraining/`. Use `STAGE2_EXP_NAME` if Stage II used another experiment name. Fine-tuning data and normalization statistics are prepared automatically; checkpoints are saved to `checkpoints/stage3_finetuning_libero/libero/<step>/` for the example above. [Normalization details](docs/norm_stats.md) explain the EEF action and gripper conventions.
 
-To use another dataset, add a `TrainConfig` in [`src/openpi/training/config.py`](src/openpi/training/config.py), then compute normalization statistics:
+Weights & Biases logging uses project `plaw-vla`; sign in with `.venv/bin/wandb login`, or pass `--no-wandb-enabled` to a training wrapper.
 
-```bash
-uv run python scripts/compute_norm_stats.py --config-name <config_name>
-```
+## LIBERO evaluation
 
-[`examples/libero/convert_libero_data_to_lerobot.py`](examples/libero/convert_libero_data_to_lerobot.py) is a reference converter. See [docs/norm_stats.md](docs/norm_stats.md).
-
-## Evaluation
-
-The LIBERO client uses Python 3.8 and the `third_party/libero` submodule.
+Install the dedicated simulator environment:
 
 ```bash
-git submodule update --init --recursive
 uv sync --project examples/libero --python 3.8 --frozen
 ```
 
-Start the policy server. `--policy.dir` is a checkpoint step directory containing `model.safetensors`.
+Start the policy server using a Stage III checkpoint step directory that contains `model.safetensors` and `assets/`:
 
 ```bash
-uv run scripts/serve_policy.py --env LIBERO policy:checkpoint \
+.venv/bin/python scripts/serve_policy.py --env LIBERO policy:checkpoint \
   --policy.config=stage3_finetuning_libero \
-  --policy.dir=checkpoints/stage3_finetuning_libero/stage3_finetuning_libero/<step>
+  --policy.dir=/path/to/libero/checkpoint/step
 ```
 
-Start the simulator client in another process. Other suites are `libero_object`, `libero_goal`, and `libero_10`.
+Run the client in another terminal:
 
 ```bash
-uv run --project examples/libero --frozen python examples/libero/main.py \
-  --task-suite-name libero_spatial
+MUJOCO_GL=egl uv run --project examples/libero --frozen python examples/libero/main.py \
+  --task-suite-name libero_spatial --seed 42
 ```
 
-Multi-suite and multi-GPU evaluation: [`examples/libero/README.md`](examples/libero/README.md).
+Other suites are `libero_object`, `libero_goal`, and `libero_10`. See [the LIBERO guide](examples/libero/README.md) for task selection and batch evaluation, and [remote inference](docs/remote_inference.md) for the client protocol. Optional benchmarks have [a separate guide](docs/benchmarks.md).
+
+## Repository guide
+
+| Path | Contents |
+| --- | --- |
+| [src/openpi/models_pytorch](src/openpi/models_pytorch) | PLaW-VLA policy, latent world model, and Transformers integration |
+| [src/openpi/training](src/openpi/training) | Training recipes, data loaders, and checkpoint utilities |
+| [src/openpi/policies](src/openpi/policies) | Dataset and benchmark observation/action adapters |
+| [src/openpi/datasets](src/openpi/datasets) | Local conversion, merging, and LeRobot format helpers |
+| [scripts](scripts) | Resource preparation, normalization, training, and serving |
+| [examples](examples) | Dataset converters and benchmark clients |
+| [packages/openpi-client](packages/openpi-client) | Lightweight WebSocket client |
+| [docs](docs) | Data preparation, pretraining, normalization, and inference guides |
+
+## TODO
+
+- [x] ~~Three-stage training pipeline~~
+- [x] ~~Local data conversion and pretraining recipes~~
+- [x] ~~LIBERO fine-tuning and evaluation~~
+- [ ] Support RoboTwin
+- [ ] Support LIBERO-Plus
 
 ## License
 
-Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+PLaW-VLA code is licensed under [Apache-2.0](LICENSE), with third-party exceptions and attributions in [NOTICE](NOTICE) and [LICENSES](LICENSES). Data, base models, and future checkpoint releases have separate terms; see [the licensing guide](docs/licenses.md). LIBERO-Plus remains an optional external dependency whose upstream code license is unresolved ([upstream issue](https://github.com/sylvestf/LIBERO-plus/issues/68)); its source and assets are excluded from Python distributions.
 
 ## Citation
 
@@ -151,4 +178,4 @@ Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
 ## Acknowledgments
 
-This repository builds on [openpi](https://github.com/Physical-Intelligence/openpi), [V-JEPA 2](https://github.com/facebookresearch/vjepa2), [LIBERO](https://github.com/Lifelong-Robot-Learning/LIBERO), [LeRobot](https://github.com/huggingface/lerobot), and [Big Vision](https://github.com/google-research/big_vision).
+This repository is organized from [LWM-VLA](https://github.com/RainyRobo/LWM-VLA) and builds on [openpi](https://github.com/Physical-Intelligence/openpi), [V-JEPA 2](https://github.com/facebookresearch/vjepa2), [LIBERO](https://github.com/Lifelong-Robot-Learning/LIBERO), [LeRobot](https://github.com/huggingface/lerobot), and [Big Vision](https://github.com/google-research/big_vision). Optional benchmark adapters build on [RoboTwin](https://github.com/RoboTwin-Platform/RoboTwin), [LingBot-VLA](https://github.com/Robbyant/lingbot-vla), and [LIBERO-Plus](https://github.com/sylvestf/LIBERO-plus).

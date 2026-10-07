@@ -1,3 +1,6 @@
+# Derived from openpi (Copyright 2024 Physical Intelligence, Inc.; Apache-2.0).
+# Modified for PLaW-VLA by the PLaW-VLA authors, 2026.
+import inspect
 import logging
 import time
 from typing import Dict, Optional, Tuple
@@ -34,8 +37,15 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
         while True:
             try:
                 headers = {"Authorization": f"Api-Key {self._api_key}"} if self._api_key else None
+                # Older sync clients do not send keepalive pings and do not accept
+                # this argument. Disable them when the installed version supports it.
+                keepalive = (
+                    {"ping_interval": None}
+                    if "ping_interval" in inspect.signature(websockets.sync.client.connect).parameters
+                    else {}
+                )
                 conn = websockets.sync.client.connect(
-                    self._uri, compression=None, max_size=None, additional_headers=headers
+                    self._uri, compression=None, max_size=None, additional_headers=headers, **keepalive
                 )
                 metadata = msgpack_numpy.unpackb(conn.recv())
                 return conn, metadata

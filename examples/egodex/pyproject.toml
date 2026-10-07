@@ -1,0 +1,24 @@
+[project]
+name = "egodex"
+version = "0.1.0"
+description = "EgoDex data download and processing for openpi"
+requires-python = ">=3.12"
+dependencies = [
+    "chex",
+    "decord",
+    "h5py",
+    "lerobot",
+    "numpy",
+    "numpydantic>=1.6.6",
+    "pydantic>=2.11.0",
+    "pillow",
+    "pyarrow",
+    "ray",
+    "rich>=14.0.0",
+    "scipy",
+    "tqdm",
+    "tyro",
+]
+
+[tool.uv.sources]
+lerobot = { git = "https://github.com/huggingface/lerobot", rev = "017ff73fbfe46bf9a673cd9b402988dcb79151f7" }

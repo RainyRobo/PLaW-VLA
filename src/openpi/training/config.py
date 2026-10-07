@@ -1,3 +1,5 @@
+# Derived from openpi (Copyright 2024 Physical Intelligence, Inc.; Apache-2.0).
+# Modified for PLaW-VLA by the PLaW-VLA authors, 2026.
 """See _CONFIGS for the list of available configs."""
 
 import abc
@@ -6,6 +8,7 @@ import dataclasses
 import difflib
 import json
 import logging
+import os
 import pathlib
 from typing import Any, ClassVar, Literal, Protocol, TypeAlias
 
@@ -18,6 +21,11 @@ import tyro
 import openpi.models.model as _model
 import openpi.models.pi0_config as pi0_config
 import openpi.models.tokenizer as _tokenizer
+import openpi.policies.agibot_policy as agibot_policy
+import openpi.policies.aloha_policy as aloha_policy
+import openpi.policies.egodex_policy as egodex_policy
+import openpi.policies.intern_a1_policy as intern_a1_policy
+import openpi.policies.libero_plus_policy as libero_plus_policy
 import openpi.policies.libero_policy as libero_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
@@ -73,7 +81,7 @@ class WorldModelDataConfig:
     # Activation is controlled by `model.enable_world_model`.
     image_keys: Sequence[str] | None = None
 
-    # Explicit temporal configuration for the legacy count/stride mode.
+    # Explicit temporal configuration for count/stride sampling.
     # In the explicit time-offset mode below, history/future counts are derived
     # from `time_offsets_s`, and `frame_stride` is unused.
     history_num_frames: int = 3
@@ -933,6 +941,1189 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
 
 
 @dataclasses.dataclass(frozen=True)
+class LocalStateActionLayout:
+    state_dim: int
+    action_dim: int
+    state_names: tuple[str, ...] | None = None
+    action_names: tuple[str, ...] | None = None
+
+    def infer_state_semantics(self) -> ActionSemantics | None:
+        return _infer_semantics_from_feature_names(self.state_names)
+
+    def infer_action_semantics(self) -> ActionSemantics | None:
+        return _infer_semantics_from_feature_names(self.action_names)
+
+def _normalize_feature_names(names: Any) -> tuple[str, ...] | None:
+    if not isinstance(names, Sequence) or isinstance(names, str | bytes):
+        return None
+    return tuple(str(name) for name in names)
+
+def _infer_semantics_from_feature_names(names: tuple[str, ...] | None) -> ActionSemantics | None:
+    if not names:
+        return None
+    normalized = tuple(str(name) for name in names)
+    if any("joint_" in name for name in normalized):
+        return "joint_position"
+    if any("effector" in name for name in normalized):
+        return "joint_effector_position"
+    if any("quaternion" in name for name in normalized):
+        return "ee_pose"
+    return None
+
+def _resolve_local_state_action_layout(repo_id: str | Sequence[str] | None) -> LocalStateActionLayout | None:
+    expanded_repo_id = _expand_local_repo_ids(repo_id)
+    if expanded_repo_id is None:
+        return None
+
+    repo_ids = [expanded_repo_id] if isinstance(expanded_repo_id, str) else [str(item) for item in expanded_repo_id]
+    resolved_layouts: set[tuple[int, int, tuple[str, ...] | None, tuple[str, ...] | None]] = set()
+    for single_repo_id in repo_ids:
+        info = _load_local_dataset_info(single_repo_id)
+        if info is None:
+            continue
+        features = info.get("features", {})
+        if not isinstance(features, dict):
+            continue
+        state_feature = features.get("observation.state", {})
+        action_feature = features.get("action", features.get("actions", {}))
+        state_shape = tuple(state_feature.get("shape") or ())
+        action_shape = tuple(action_feature.get("shape") or ())
+        if not state_shape or not action_shape:
+            continue
+        resolved_layouts.add(
+            (
+                int(state_shape[-1]),
+                int(action_shape[-1]),
+                _normalize_feature_names(state_feature.get("names")),
+                _normalize_feature_names(action_feature.get("names")),
+            )
+        )
+
+    if len(resolved_layouts) > 1:
+        raise ValueError(
+            "Mixed local state/action layouts are not supported in one config: "
+            f"{sorted(resolved_layouts)}"
+        )
+    if not resolved_layouts:
+        return None
+
+    state_dim, action_dim, state_names, action_names = resolved_layouts.pop()
+    return LocalStateActionLayout(
+        state_dim=state_dim,
+        action_dim=action_dim,
+        state_names=state_names,
+        action_names=action_names,
+    )
+
+def _infer_local_agibot_eef_types(repo_id: str | Sequence[str] | None) -> set[str]:
+    if repo_id is None:
+        return set()
+
+    repo_ids = [repo_id] if isinstance(repo_id, str) else [str(item) for item in repo_id]
+    eef_types: set[str] = set()
+    for single_repo_id in repo_ids:
+        info = _load_local_dataset_info(single_repo_id)
+        if info is None:
+            continue
+        eef_type = info.get("openpi_agibot_eef_type") or info.get("openpi_embodiment")
+        if isinstance(eef_type, str) and eef_type.strip():
+            eef_types.add(eef_type.strip().lower())
+    return eef_types
+
+def _resolve_agibot_eef_type(
+    repo_id: str | Sequence[str] | None,
+    explicit_eef_type: Literal["gripper", "dexhand"] | None,
+    *,
+    allow_mixed: bool = False,
+) -> Literal["gripper", "dexhand"]:
+    inferred_eef_types = _infer_local_agibot_eef_types(repo_id)
+
+    if len(inferred_eef_types) > 1:
+        if allow_mixed and explicit_eef_type is None:
+            logging.info(
+                "Detected mixed AgiBot embodiments %s; using a temporary gripper layout until child datasets "
+                "are specialized per repo.",
+                sorted(inferred_eef_types),
+            )
+            return "gripper"
+        raise ValueError(
+            f"Mixed AgiBot embodiments are not supported in one training config: {sorted(inferred_eef_types)}"
+        )
+
+    if explicit_eef_type is not None:
+        if inferred_eef_types and inferred_eef_types != {explicit_eef_type}:
+            raise ValueError(
+                f"Configured AgiBot embodiment {explicit_eef_type!r} does not match dataset metadata "
+                f"{sorted(inferred_eef_types)}."
+            )
+        return explicit_eef_type
+
+    if not inferred_eef_types:
+        logging.info("Could not infer AgiBot embodiment from dataset metadata; defaulting to gripper layout.")
+        return "gripper"
+
+    inferred_eef_type = inferred_eef_types.pop()
+    if inferred_eef_type not in {"gripper", "dexhand"}:
+        raise ValueError(f"Unsupported AgiBot embodiment {inferred_eef_type!r}.")
+    return inferred_eef_type
+
+def _agibot_native_action_dim(
+    eef_type: Literal["gripper", "dexhand"],
+    *,
+    canonical_gripper_action_space: Literal["joint_effector_position", "ee_pose"] = "joint_effector_position",
+) -> int:
+    if eef_type == "gripper" and canonical_gripper_action_space == "ee_pose":
+        return 16
+    return 22 if eef_type == "gripper" else 32
+
+def _agibot_delta_mask(
+    eef_type: Literal["gripper", "dexhand"],
+    *,
+    canonical_gripper_action_space: Literal["joint_effector_position", "ee_pose"] = "joint_effector_position",
+) -> tuple[bool, ...]:
+    if eef_type == "gripper" and canonical_gripper_action_space == "ee_pose":
+        return tuple()
+    return _AGIBOT_GRIPPER_DELTA_MASK if eef_type == "gripper" else _AGIBOT_DEXHAND_DELTA_MASK
+
+def _agibot_state_mask(
+    eef_type: Literal["gripper", "dexhand"],
+    *,
+    canonical_gripper_action_space: Literal["joint_effector_position", "ee_pose"] = "joint_effector_position",
+) -> tuple[bool, ...]:
+    if eef_type == "gripper" and canonical_gripper_action_space == "ee_pose":
+        return (False,) * 16
+    return _AGIBOT_GRIPPER_STATE_MASK if eef_type == "gripper" else _AGIBOT_DEXHAND_STATE_MASK
+
+def _agibot_action_mask(
+    eef_type: Literal["gripper", "dexhand"],
+    *,
+    canonical_gripper_action_space: Literal["joint_effector_position", "ee_pose"] = "joint_effector_position",
+) -> tuple[bool, ...]:
+    if eef_type == "gripper" and canonical_gripper_action_space == "ee_pose":
+        return (False,) * 16
+    return _AGIBOT_GRIPPER_ACTION_MASK if eef_type == "gripper" else _AGIBOT_DEXHAND_ACTION_MASK
+
+def _agibot_repack_mapping(pretrain_world_model: bool) -> dict[str, str]:
+    repack_mapping: dict[str, str] = {
+        "top_head": "observation.images.head",
+        "hand_left": "observation.images.hand_left",
+        "hand_right": "observation.images.hand_right",
+        "prompt": "prompt",
+    }
+    if not pretrain_world_model:
+        repack_mapping["state"] = "observation.state"
+        repack_mapping["actions"] = "actions"
+    return repack_mapping
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotAlohaDataConfig(DataConfigFactory):
+    """Shared ALOHA-style data transforms used by RoboTwin datasets.
+
+    When ``pretrain_world_model=True``, state and actions are omitted from
+    the repack transform, the policy transform zeroes state and skips
+    actions, and ``action_sequence_keys`` is empty.
+    """
+
+    use_delta_joint_actions: bool = True
+    default_prompt: str | None = None
+    adapt_to_pi: bool = True
+    native_action_dim: int = 14
+    pretrain_world_model: bool = False
+
+    # Repack transforms.
+    repack_transforms: tyro.conf.Suppress[_transforms.Group | None] = None
+    # Action keys that will be used to read the action sequence from the dataset.
+    action_sequence_keys: Sequence[str] = ("action",)
+
+    def _build_repack_transforms(self) -> _transforms.Group:
+        if self.repack_transforms is not None:
+            return self.repack_transforms
+        mapping: dict[str, str] = {
+            "cam_high": "observation.images.cam_high",
+            "cam_left_wrist": "observation.images.cam_left_wrist",
+            "cam_right_wrist": "observation.images.cam_right_wrist",
+            "prompt": "prompt",
+        }
+        if not self.pretrain_world_model:
+            mapping["state"] = "observation.state"
+            mapping["actions"] = "action"
+        return _transforms.Group(inputs=[_transforms.RepackTransform(mapping)])
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        base_config = self.create_base_config(assets_dirs, model_config)
+        wm_enabled = self._effective_world_model_enabled(model_config)
+        wm_config = self._resolve_world_model_config(model_config)
+        image_keys = tuple(wm_config.image_keys) if wm_config.image_keys else _ALOHA_DEFAULT_IMAGE_KEYS
+        effective_wm_config = dataclasses.replace(wm_config, image_keys=image_keys)
+        repack = self._build_repack_transforms()
+
+        name_change_map = self._create_name_change_map(repack)
+        repacked_image_keys = [name_change_map.get(key, key) for key in image_keys] if wm_enabled else []
+
+        world_model_transforms = self._create_world_model_transforms(
+            wm_enabled=wm_enabled,
+            wm_config=effective_wm_config,
+            model_config=model_config,
+            image_keys=repacked_image_keys,
+        )
+
+        data_transforms = _transforms.Group(
+            inputs=[aloha_policy.AlohaInputs(
+                adapt_to_pi=self.adapt_to_pi,
+                pretrain_world_model=self.pretrain_world_model,
+                action_dim=model_config.action_dim,
+                native_action_dim=self.native_action_dim,
+                enable_world_model=wm_enabled,
+                image_keys=repacked_image_keys,
+            )],
+            outputs=[
+                aloha_policy.AlohaOutputs(
+                    adapt_to_pi=self.adapt_to_pi,
+                    pretrain_world_model=self.pretrain_world_model,
+                    native_action_dim=self.native_action_dim,
+                )
+            ],
+        )
+        if not self.pretrain_world_model and self.use_delta_joint_actions:
+            if self.native_action_dim != 14:
+                raise ValueError(
+                    "use_delta_joint_actions=True is only supported for canonical 14D Aloha joint actions, "
+                    f"got native_action_dim={self.native_action_dim}."
+                )
+            delta_action_mask = _transforms.make_bool_mask(6, -1, 6, -1)
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(delta_action_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+            )
+
+        model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
+
+        return dataclasses.replace(
+            base_config,
+            world_model=effective_wm_config,
+            repack_transforms=repack,
+            world_model_transforms=world_model_transforms,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=() if self.pretrain_world_model else self.action_sequence_keys,
+        )
+
+_LIBERO_PLUS_DEFAULT_IMAGE_KEYS: tuple[str, ...] = ("observation.images.front",)
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotLiberoPlusDataConfig(DataConfigFactory):
+    """Data config for Libero Plus datasets."""
+
+    extra_delta_transform: bool = False
+    pretrain_world_model: bool = False
+    canonicalize_ee_pose_gripper: bool = False
+    treat_actions_as_commands: bool = True
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repack_mapping: dict[str, str] = {
+            "observation/front_image": "observation.images.front",
+            "observation/wrist_image": "observation.images.wrist",
+            "prompt": "prompt",
+        }
+        if not self.pretrain_world_model:
+            repack_mapping["observation/state"] = "observation.state"
+            repack_mapping["actions"] = "action"
+
+        repack_transform = _transforms.Group(
+            inputs=[_transforms.RepackTransform(repack_mapping)]
+        )
+        wm_enabled = self._effective_world_model_enabled(model_config)
+        wm_config = self._resolve_world_model_config(model_config)
+        image_keys = tuple(wm_config.image_keys) if wm_config.image_keys else _LIBERO_PLUS_DEFAULT_IMAGE_KEYS
+
+        name_change_map = self._create_name_change_map(repack_transform)
+        repacked_image_keys = [name_change_map.get(key, key) for key in image_keys] if wm_enabled else []
+
+        world_model_transforms = self._create_world_model_transforms(
+            wm_enabled=wm_enabled,
+            wm_config=wm_config,
+            model_config=model_config,
+            image_keys=repacked_image_keys,
+        )
+        data_transforms = _transforms.Group(
+            inputs=[libero_plus_policy.LiberoPlusInputs(
+                model_type=model_config.model_type,
+                pretrain_world_model=self.pretrain_world_model,
+                action_dim=model_config.action_dim,
+                enable_world_model=wm_enabled,
+                image_keys=repacked_image_keys,
+                canonicalize_ee_pose_gripper=self.canonicalize_ee_pose_gripper,
+                treat_actions_as_commands=self.treat_actions_as_commands,
+            )],
+            outputs=[
+                libero_plus_policy.LiberoPlusOutputs(
+                    pretrain_world_model=self.pretrain_world_model,
+                    canonicalize_ee_pose_gripper=self.canonicalize_ee_pose_gripper,
+                    treat_actions_as_commands=self.treat_actions_as_commands,
+                )
+            ],
+        )
+
+        if not self.pretrain_world_model and self.extra_delta_transform:
+            if self.canonicalize_ee_pose_gripper:
+                raise ValueError(
+                    "extra_delta_transform=True is not supported when canonicalize_ee_pose_gripper=True "
+                    "because LIBERO+ actions are treated as EE command-space targets."
+                )
+            delta_action_mask = _transforms.make_bool_mask(6, -1)
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(delta_action_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+            )
+
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            world_model_transforms=world_model_transforms,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=() if self.pretrain_world_model else ("action",),
+        )
+
+_EGODEX_DEFAULT_IMAGE_KEYS: tuple[str, ...] = ("observation.images.top",)
+
+_EGODEX_DEFAULT_ACTION_STRIDE = 3
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotEgoDexDataConfig(DataConfigFactory):
+    """
+    Data config for EgoDex dataset in LeRobot format.
+
+    To build EgoDex v3 datasets from raw data, see examples/egodex/convert_egodex_to_lerobot.py.
+    The converter keeps per-frame absolute 48 DoF hand states/actions. The
+    loader assembles the queried future action chunk at training time. Uniform
+    action-time settings override the default ``action_stride`` spacing. For
+    camera-frame delta actions, enable ``use_delta_actions=True`` and the
+    transform will be applied during training/stat computation instead of
+    preprocessing. Wrist images are still masked during training. When
+    ``pretrain_world_model=True``, only images + prompt are loaded; state is
+    zeroed and actions are omitted.
+    """
+
+    pretrain_world_model: bool = False
+    use_delta_actions: bool = False
+    action_stride: int = _EGODEX_DEFAULT_ACTION_STRIDE
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        if self.action_stride <= 0:
+            raise ValueError(f"action_stride must be > 0, got {self.action_stride}.")
+        base_config = self.create_base_config(assets_dirs, model_config)
+        if self.pretrain_world_model:
+            base_config = dataclasses.replace(base_config, norm_stats=None)
+
+        repack_mapping = {
+            "observation/image": "observation.images.top",
+            "prompt": "task",
+        }
+        if not self.pretrain_world_model:
+            repack_mapping["state"] = "observation.state"
+            repack_mapping["actions"] = "actions"
+            if self.use_delta_actions:
+                repack_mapping["camera_extrinsic"] = "egodex.camera_extrinsic"
+
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    repack_mapping
+                )
+            ]
+        )
+        wm_enabled = self._effective_world_model_enabled(model_config)
+        wm_config = self._resolve_world_model_config(model_config)
+        image_keys = tuple(wm_config.image_keys) if wm_config.image_keys else _EGODEX_DEFAULT_IMAGE_KEYS
+
+        name_change_map = self._create_name_change_map(repack_transform)
+        repacked_image_keys = [name_change_map.get(key, key) for key in image_keys] if wm_enabled else []
+
+        world_model_transforms = self._create_world_model_transforms(
+            wm_enabled=wm_enabled,
+            wm_config=wm_config,
+            model_config=model_config,
+            image_keys=repacked_image_keys,
+        )
+        input_transforms: list[_transforms.DataTransformFn] = []
+        if not self.pretrain_world_model and self.use_delta_actions:
+            input_transforms.append(egodex_policy.EgoDexDeltaActions())
+        input_transforms.append(egodex_policy.EgoDexInputs(
+            model_type=model_config.model_type,
+            action_dim=model_config.action_dim,
+            pretrain_world_model=self.pretrain_world_model,
+            enable_world_model=wm_enabled,
+            image_keys=repacked_image_keys,
+        ))
+        data_transforms = _transforms.Group(
+            inputs=input_transforms,
+            outputs=[egodex_policy.EgoDexOutputs(
+                action_dim=model_config.action_dim,
+                pretrain_world_model=self.pretrain_world_model,
+            )],
+        )
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            base_config,
+            repack_transforms=repack_transform,
+            world_model_transforms=world_model_transforms,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=() if self.pretrain_world_model else ("actions",),
+            action_sequence_offsets=(
+                None
+                if self.pretrain_world_model
+                else tuple(self.action_stride * (i + 1) for i in range(model_config.action_horizon))
+            ),
+        )
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotAgiBotWorldDataConfig(DataConfigFactory):
+    """Data config for AgiBotWorld training.
+
+    When ``pretrain_world_model=False`` (default), expects canonical
+    ``observation.state`` / ``actions`` fields. Embodiment metadata is used
+    only to select the native action dimension and masking layout. When
+    ``pretrain_world_model=True``, only images + prompt are loaded; state is
+    zeroed and actions are omitted.
+    """
+
+    repo_id: str | Sequence[str] = tyro.MISSING
+    pretrain_world_model: bool = False
+    use_delta_joint_actions: bool = True
+    eef_type: Literal["gripper", "dexhand"] | None = None
+    canonical_gripper_action_space: Literal["joint_effector_position", "ee_pose"] = "joint_effector_position"
+    canonicalize_gripper_openness: bool = True
+
+    action_sequence_keys: Sequence[str] = ("actions",)
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        base_config = self.create_base_config(assets_dirs, model_config)
+        wm_enabled = self._effective_world_model_enabled(model_config)
+        wm_config = self._resolve_world_model_config(model_config)
+        eef_type = _resolve_agibot_eef_type(base_config.repo_id, self.eef_type, allow_mixed=True)
+        native_action_dim = _agibot_native_action_dim(
+            eef_type,
+            canonical_gripper_action_space=self.canonical_gripper_action_space,
+        )
+        if eef_type == "gripper" and self.canonical_gripper_action_space == "ee_pose" and self.use_delta_joint_actions:
+            raise ValueError(
+                "use_delta_joint_actions=True is not supported when canonical_gripper_action_space='ee_pose' "
+                "because quaternion pose actions are not subtraction-compatible."
+            )
+
+        repack_mapping = _agibot_repack_mapping(self.pretrain_world_model)
+        repack_transform = _transforms.Group(
+            inputs=[_transforms.RepackTransform(repack_mapping)]
+        )
+
+        name_change_map = self._create_name_change_map(repack_transform)
+        repacked_image_keys = [name_change_map.get(key, key) for key in wm_config.image_keys] if wm_enabled and wm_config.image_keys else []
+
+        world_model_transforms = self._create_world_model_transforms(
+            wm_enabled=wm_enabled,
+            wm_config=wm_config,
+            model_config=model_config,
+            image_keys=repacked_image_keys,
+        )
+        data_transforms = _transforms.Group(
+            inputs=[agibot_policy.AGIBotInputs(
+                action_dim=model_config.action_dim,
+                pretrain_world_model=self.pretrain_world_model,
+                state_mask=_agibot_state_mask(
+                    eef_type,
+                    canonical_gripper_action_space=self.canonical_gripper_action_space,
+                ),
+                action_mask=_agibot_action_mask(
+                    eef_type,
+                    canonical_gripper_action_space=self.canonical_gripper_action_space,
+                ),
+                native_action_dim=native_action_dim,
+                enable_world_model=wm_enabled,
+                image_keys=repacked_image_keys,
+                canonicalize_gripper_openness=self.canonicalize_gripper_openness,
+                state_semantics=(
+                    "ee_pose"
+                    if eef_type == "gripper" and self.canonical_gripper_action_space == "ee_pose"
+                    else "joint_effector_position"
+                ),
+            )],
+            outputs=[agibot_policy.AGIBotOutputs(
+                native_action_dim=native_action_dim,
+                pretrain_world_model=self.pretrain_world_model,
+                canonicalize_gripper_openness=self.canonicalize_gripper_openness,
+                state_semantics=(
+                    "ee_pose"
+                    if eef_type == "gripper" and self.canonical_gripper_action_space == "ee_pose"
+                    else "joint_effector_position"
+                ),
+            )],
+        )
+        if not self.pretrain_world_model and self.use_delta_joint_actions:
+            data_transforms = data_transforms.push(
+                inputs=[
+                    _transforms.DeltaActions(
+                        _agibot_delta_mask(
+                            eef_type,
+                            canonical_gripper_action_space=self.canonical_gripper_action_space,
+                        )
+                    )
+                ],
+                outputs=[
+                    _transforms.AbsoluteActions(
+                        _agibot_delta_mask(
+                            eef_type,
+                            canonical_gripper_action_space=self.canonical_gripper_action_space,
+                        )
+                    )
+                ],
+            )
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            base_config,
+            repack_transforms=repack_transform,
+            world_model_transforms=world_model_transforms,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=() if self.pretrain_world_model else self.action_sequence_keys,
+        )
+
+    def _load_norm_stats(self, assets_dir: epath.Path, asset_id) -> dict[str, _transforms.NormStats] | None:
+        if asset_id is None:
+            return None
+        if not isinstance(asset_id, list):
+            asset_id = [asset_id]
+        for a_id in asset_id:
+            try:
+                data_assets_dir = str(assets_dir / a_id)
+                norm_stats = _normalize.load(_download.maybe_download(data_assets_dir))
+                logging.info(f"Loaded norm stats from {data_assets_dir}")
+                return norm_stats
+            except FileNotFoundError:
+                continue
+        logging.info("Norm stats not found for any asset_id, skipping.")
+        return None
+
+_AGIBOT_GRIPPER_DELTA_MASK = _transforms.make_bool_mask(14, -6)
+
+_AGIBOT_GRIPPER_STATE_MASK = _transforms.make_bool_mask(-16, 4)
+
+_AGIBOT_GRIPPER_ACTION_MASK = _transforms.make_bool_mask(-16, 6)
+
+_AGIBOT_DEXHAND_DELTA_MASK = _transforms.make_bool_mask(14, -16)
+
+_AGIBOT_DEXHAND_STATE_MASK = _transforms.make_bool_mask(-26, 4)
+
+_AGIBOT_DEXHAND_ACTION_MASK = _transforms.make_bool_mask(-26, 6)
+
+_INTERN_A1_DELTA_MASK = _transforms.make_bool_mask(7, -1, 7, -1)
+
+_INTERN_A1_DEFAULT_IMAGE_KEYS: tuple[str, ...] = ("observation.images.cam_high",)
+
+_ALOHA_DEFAULT_IMAGE_KEYS: tuple[str, ...] = ("observation.images.cam_high",)
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotInternA1DataConfig(DataConfigFactory):
+    """Data config for canonical InternData-A1 LeRobot v3 datasets."""
+
+    default_prompt: str | None = None
+    pretrain_world_model: bool = False
+    use_delta_joint_actions: bool = False
+    canonical_action_space: Literal["joint_position", "ee_pose"] = "joint_position"
+    action_sequence_keys: Sequence[str] = ("actions",)
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        base_config = self.create_base_config(assets_dirs, model_config)
+        if self.pretrain_world_model:
+            base_config = dataclasses.replace(base_config, norm_stats=None)
+        wm_enabled = self._effective_world_model_enabled(model_config)
+        wm_config = self._resolve_world_model_config(model_config)
+        if self.canonical_action_space == "ee_pose" and self.use_delta_joint_actions:
+            raise ValueError(
+                "use_delta_joint_actions=True is not supported when canonical_action_space='ee_pose' "
+                "because quaternion pose actions are not subtraction-compatible."
+            )
+
+        image_keys = tuple(wm_config.image_keys) if wm_config.image_keys else _INTERN_A1_DEFAULT_IMAGE_KEYS
+        world_model_transforms = self._create_world_model_transforms(
+            wm_enabled=wm_enabled,
+            wm_config=wm_config,
+            model_config=model_config,
+            image_keys=image_keys,
+        )
+
+        data_transforms = _transforms.Group(
+            inputs=[
+                intern_a1_policy.InternA1Inputs(
+                    model_type=model_config.model_type,
+                    pretrain_world_model=self.pretrain_world_model,
+                    action_dim=model_config.action_dim,
+                    enable_world_model=wm_enabled,
+                    image_keys=image_keys,
+                    state_semantics=self.canonical_action_space,
+                )
+            ],
+            outputs=[
+                intern_a1_policy.InternA1Outputs(
+                    pretrain_world_model=self.pretrain_world_model,
+                    state_semantics=self.canonical_action_space,
+                )
+            ],
+        )
+
+        if not self.pretrain_world_model and self.use_delta_joint_actions:
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(_INTERN_A1_DELTA_MASK)],
+                outputs=[_transforms.AbsoluteActions(_INTERN_A1_DELTA_MASK)],
+            )
+
+        model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
+
+        return dataclasses.replace(
+            base_config,
+            repack_transforms=_transforms.Group(),
+            world_model_transforms=world_model_transforms,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=() if self.pretrain_world_model else self.action_sequence_keys,
+        )
+
+DatasetType: TypeAlias = Literal[
+    "agibot",
+    "egodex",
+    "intern_a1",
+    "libero",
+    "libero_plus",
+    "robotwin",
+]
+
+@dataclasses.dataclass(frozen=True)
+class MultiDatasetPretrainDatasetSpec:
+    """Spec for one dataset group in multi-dataset training."""
+
+    repo_id: str | Sequence[str]
+    dataset_type: DatasetType
+    weight: float = 1.0
+    # Optional override for world-model temporal image keys for this dataset type.
+    # If None, _DEFAULT_IMAGE_KEYS[dataset_type] is used.
+    image_keys: Sequence[str] | None = None
+    # Optional override for the world-model frame stride for this dataset.
+    # This is useful when mixing datasets with different FPS while keeping a
+    # similar real-time temporal step across the mixture.
+    world_model_frame_stride: int | None = None
+
+@dataclasses.dataclass(frozen=True)
+class MultiDatasetPretrainDataConfig(DataConfigFactory):
+    """Unified multi-dataset config for action/world-model training."""
+
+    repo_id: str = "multi_dataset_pretrain"
+    datasets: tyro.conf.Suppress[Sequence[MultiDatasetPretrainDatasetSpec]] = ()
+    use_canonical_delta_actions: bool = False
+
+    _TYPE_FACTORIES: ClassVar[dict[str, type[DataConfigFactory]]] = {
+        "agibot": LeRobotAgiBotWorldDataConfig,
+        "egodex": LeRobotEgoDexDataConfig,
+        "intern_a1": LeRobotInternA1DataConfig,
+        "libero": LeRobotLiberoDataConfig,
+        "libero_plus": LeRobotLiberoPlusDataConfig,
+        "robotwin": LeRobotAlohaDataConfig,
+    }
+    _FACTORY_OVERRIDES: ClassVar[dict[str, dict[str, Any]]] = {
+        # Disable local per-dataset delta transforms so multi-dataset training
+        # can apply one shared delta stage after canonical alignment auditing.
+        "agibot": {"use_delta_joint_actions": False},
+        "egodex": {"use_delta_actions": False},
+        "intern_a1": {"use_delta_joint_actions": False},
+        "libero": {
+            "extra_delta_transform": False,
+            "canonicalize_ee_pose_gripper": True,
+            # LIBERO and Stage III converters store absolute EEF targets
+            # and physical gripper widths before the shared delta transform.
+            "dataset_state_gripper_format": "physical_width",
+            "dataset_action_gripper_format": "absolute_physical_width",
+        },
+        "libero_plus": {"extra_delta_transform": False, "canonicalize_ee_pose_gripper": True},
+        # RoboTwin defaults to the ee16 layout; local metadata can override it.
+        "robotwin": {"use_delta_joint_actions": False, "adapt_to_pi": False, "native_action_dim": 16},
+    }
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        configs = self.create_all(assets_dirs, model_config)
+        return configs[0][0]
+
+    def create_all(
+        self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig
+    ) -> list[tuple[DataConfig, float]]:
+        """Create a DataConfig for each dataset spec, paired with its sampling weight."""
+        if not self.datasets:
+            raise ValueError("MultiDatasetPretrainDataConfig requires at least one dataset spec.")
+
+        result: list[tuple[DataConfig, float]] = []
+        training_stage = self._resolve_training_stage(model_config)
+        for spec in self.datasets:
+            factory = self._create_factory_for_spec(spec, training_stage=training_stage)
+            data_config = factory.create(assets_dirs, model_config)
+            descriptor = self._audit_action_space(spec, data_config)
+            self._validate_descriptor_against_local_metadata(
+                dataset_type=spec.dataset_type,
+                repo_id=data_config.repo_id,
+                descriptor=descriptor,
+            )
+            pretrain_flags = [
+                bool(transform.pretrain_world_model)
+                for transform in data_config.data_transforms.inputs
+                if hasattr(transform, "pretrain_world_model")
+            ]
+            descriptor.validate_for_stage(
+                dataset_type=spec.dataset_type,
+                training_stage=training_stage,
+                has_actions=bool(data_config.action_sequence_keys),
+            )
+            if training_stage == "post_training" and any(pretrain_flags):
+                raise ValueError(
+                    f"Dataset type {spec.dataset_type!r} still uses pretrain_world_model semantics during post_training."
+                )
+            data_config = dataclasses.replace(
+                data_config,
+                dataset_type=spec.dataset_type,
+                action_space_descriptor=descriptor,
+            )
+            if training_stage == "post_training" and self.use_canonical_delta_actions:
+                data_config = self._apply_shared_delta_transform(
+                    data_config,
+                    dataset_type=spec.dataset_type,
+                    descriptor=descriptor,
+                )
+            result.append((data_config, spec.weight))
+            repo_summary = data_config.repo_id
+            if isinstance(repo_summary, Sequence) and not isinstance(repo_summary, str):
+                repo_summary = f"{len(repo_summary)} child datasets (first: {repo_summary[0]})" if repo_summary else "0 child datasets"
+            logging.info(
+                f"MultiDatasetPretrain: stage={training_stage}, type={spec.dataset_type}, "
+                f"repo_id={repo_summary}, weight={spec.weight}"
+            )
+        return result
+
+    _DEFAULT_IMAGE_KEYS: ClassVar[dict[str, tuple[str, ...]]] = {
+        "agibot": ("observation.images.head",),
+        "egodex": ("observation.images.top",),
+        "intern_a1": ("observation.images.cam_high",),
+        "libero": ("observation.images.image",),
+        "libero_plus": _LIBERO_PLUS_DEFAULT_IMAGE_KEYS,
+        "robotwin": ("observation.images.cam_high",),
+    }
+
+    def _apply_factory_field_overrides(
+        self,
+        kwargs: dict[str, Any],
+        *,
+        field_names: set[str],
+        overrides: dict[str, Any],
+    ) -> None:
+        for key, value in overrides.items():
+            if key in field_names:
+                kwargs[key] = value
+
+    def _local_layout_matches_ee_pose(
+        self,
+        local_layout: LocalStateActionLayout | None,
+        *,
+        expected_dim: int,
+    ) -> bool:
+        return (
+            local_layout is not None
+            and local_layout.state_dim == expected_dim
+            and local_layout.action_dim == expected_dim
+            and local_layout.infer_state_semantics() == "ee_pose"
+            and local_layout.infer_action_semantics() == "ee_pose"
+        )
+
+    def _apply_training_stage_overrides(
+        self,
+        kwargs: dict[str, Any],
+        *,
+        spec: MultiDatasetPretrainDatasetSpec,
+        field_names: set[str],
+        training_stage: Literal["wm_alignment", "post_training"],
+        local_layout: LocalStateActionLayout | None,
+    ) -> None:
+        if "pretrain_world_model" in field_names:
+            kwargs["pretrain_world_model"] = training_stage == "wm_alignment"
+        self._apply_factory_field_overrides(
+            kwargs,
+            field_names=field_names,
+            overrides=self._FACTORY_OVERRIDES.get(spec.dataset_type, {}),
+        )
+        if training_stage == "post_training" and self.use_canonical_delta_actions:
+            if spec.dataset_type == "agibot" and "canonical_gripper_action_space" in field_names:
+                kwargs["canonical_gripper_action_space"] = "ee_pose"
+            if spec.dataset_type == "intern_a1" and "canonical_action_space" in field_names:
+                kwargs["canonical_action_space"] = "ee_pose"
+            if spec.dataset_type in {"libero", "libero_plus"} and "treat_actions_as_commands" in field_names:
+                kwargs["treat_actions_as_commands"] = True
+        if spec.dataset_type == "agibot" and "canonical_gripper_action_space" in field_names:
+            if self._local_layout_matches_ee_pose(local_layout, expected_dim=16):
+                kwargs["canonical_gripper_action_space"] = "ee_pose"
+        if spec.dataset_type == "intern_a1" and "canonical_action_space" in field_names:
+            if self._local_layout_matches_ee_pose(local_layout, expected_dim=intern_a1_policy.CANONICAL_ACTION_DIM):
+                kwargs["canonical_action_space"] = "ee_pose"
+
+    def _apply_aloha_layout_overrides(
+        self,
+        kwargs: dict[str, Any],
+        *,
+        spec: MultiDatasetPretrainDatasetSpec,
+        field_names: set[str],
+        local_layout: LocalStateActionLayout | None,
+    ) -> None:
+        if not {"adapt_to_pi", "native_action_dim"}.issubset(field_names) or local_layout is None:
+            return
+        if local_layout.state_dim != local_layout.action_dim:
+            raise ValueError(
+                f"Dataset type {spec.dataset_type!r} uses an Aloha-style config but metadata reports "
+                f"observation.state dim {local_layout.state_dim} and action dim {local_layout.action_dim}."
+            )
+        kwargs["adapt_to_pi"] = local_layout.action_dim == 14
+        kwargs["native_action_dim"] = local_layout.action_dim
+
+    def _create_factory_for_spec(
+        self,
+        spec: MultiDatasetPretrainDatasetSpec,
+        *,
+        training_stage: Literal["wm_alignment", "post_training"],
+    ) -> DataConfigFactory:
+        factory_cls = self._TYPE_FACTORIES.get(spec.dataset_type)
+        if factory_cls is None:
+            raise ValueError(
+                f"Unknown dataset type '{spec.dataset_type}'. "
+                f"Available: {list(self._TYPE_FACTORIES.keys())}"
+            )
+
+        base = self.base_config or DataConfig()
+        type_image_keys = (
+            tuple(spec.image_keys)
+            if spec.image_keys is not None
+            else self._DEFAULT_IMAGE_KEYS.get(spec.dataset_type, ())
+        )
+        world_model_updates: dict[str, Any] = {"image_keys": type_image_keys}
+        if spec.world_model_frame_stride is not None:
+            world_model_updates["frame_stride"] = spec.world_model_frame_stride
+        wm = dataclasses.replace(base.world_model, **world_model_updates)
+        per_type_base = dataclasses.replace(base, world_model=wm)
+
+        repo_id = spec.repo_id
+        kwargs: dict[str, Any] = {
+            "repo_id": repo_id,
+            "base_config": per_type_base,
+        }
+        factory_field_names = {f.name for f in dataclasses.fields(factory_cls)}
+        if self.assets.assets_dir or self.assets.asset_id:
+            kwargs["assets"] = self.assets
+        if "load_norm_stats" in factory_field_names:
+            kwargs["load_norm_stats"] = self.load_norm_stats
+        local_layout = _resolve_local_state_action_layout(repo_id)
+        self._apply_training_stage_overrides(
+            kwargs,
+            spec=spec,
+            field_names=factory_field_names,
+            training_stage=training_stage,
+            local_layout=local_layout,
+        )
+        self._apply_aloha_layout_overrides(
+            kwargs,
+            spec=spec,
+            field_names=factory_field_names,
+            local_layout=local_layout,
+        )
+
+        return factory_cls(**kwargs)
+
+    def _apply_shared_delta_transform(
+        self,
+        data_config: DataConfig,
+        *,
+        dataset_type: str,
+        descriptor: ActionSpaceDescriptor,
+    ) -> DataConfig:
+        if (
+            descriptor.state_semantics == "ee_pose"
+            and descriptor.action_semantics == "ee_pose"
+            and descriptor.state_dim == descriptor.action_dim
+        ):
+            ee_prefix_mask = _transforms.make_bool_mask(descriptor.action_dim)
+            return dataclasses.replace(
+                data_config,
+                data_transforms=data_config.data_transforms.push(
+                    inputs=[_transforms.DeltaActions(mask=ee_prefix_mask, ee_pose=True)],
+                    outputs=[_transforms.AbsoluteActions(mask=ee_prefix_mask, ee_pose=True)],
+                ),
+            )
+        mask = descriptor.validate_for_shared_delta(dataset_type=dataset_type)
+        return dataclasses.replace(
+            data_config,
+            data_transforms=data_config.data_transforms.push(
+                inputs=[_transforms.DeltaActions(mask)],
+                outputs=[_transforms.AbsoluteActions(mask)],
+            ),
+        )
+
+    def _audit_action_space(
+        self,
+        spec: MultiDatasetPretrainDatasetSpec,
+        data_config: DataConfig,
+    ) -> ActionSpaceDescriptor:
+        match spec.dataset_type:
+            case "robotwin":
+                return self._audit_robotwin_action_space(data_config)
+            case "agibot":
+                return self._audit_agibot_action_space(data_config)
+            case "intern_a1":
+                return self._audit_intern_a1_action_space(data_config)
+            case "libero" | "libero_plus":
+                return self._audit_libero_action_space(data_config, dataset_type=spec.dataset_type)
+            case "egodex":
+                return self._audit_egodex_action_space(data_config)
+            case _:
+                raise ValueError(f"Unsupported dataset type {spec.dataset_type!r} for action-space auditing.")
+
+    def _validate_descriptor_against_local_metadata(
+        self,
+        *,
+        dataset_type: str,
+        repo_id: str | Sequence[str] | None,
+        descriptor: ActionSpaceDescriptor,
+    ) -> None:
+        if dataset_type in {"egodex", "libero", "libero_plus"}:
+            # These datasets intentionally canonicalize their raw 8D/7D storage
+            # into a different training space inside the policy transform, so
+            # the post-transform descriptor does not match raw info.json
+            # dimensions.
+            return
+        if dataset_type in {"agibot", "intern_a1"} and descriptor.state_semantics == "ee_pose":
+            # AgiBot and InternData can be loaded from raw/local exports
+            # whose on-disk state/action layout is not yet canonicalized even
+            # though the training transform lifts them into canonical ee pose.
+            return
+        local_layout = _resolve_local_state_action_layout(repo_id)
+        if local_layout is None:
+            return
+        if descriptor.state_dim != local_layout.state_dim or descriptor.action_dim != local_layout.action_dim:
+            raise ValueError(
+                f"Dataset type {dataset_type!r} audit descriptor "
+                f"(state_dim={descriptor.state_dim}, action_dim={descriptor.action_dim}) does not match "
+                f"local metadata (state_dim={local_layout.state_dim}, action_dim={local_layout.action_dim}). "
+                f"Audit note: {descriptor.audit_note or 'none'}"
+            )
+        local_state_semantics = local_layout.infer_state_semantics()
+        if local_state_semantics is not None and descriptor.state_semantics != local_state_semantics:
+            raise ValueError(
+                f"Dataset type {dataset_type!r} audit descriptor state semantics {descriptor.state_semantics!r} "
+                f"do not match local metadata semantics {local_state_semantics!r}. "
+                f"Audit note: {descriptor.audit_note or 'none'}"
+            )
+        local_action_semantics = local_layout.infer_action_semantics()
+        if local_action_semantics is not None and descriptor.action_semantics != local_action_semantics:
+            raise ValueError(
+                f"Dataset type {dataset_type!r} audit descriptor action semantics {descriptor.action_semantics!r} "
+                f"do not match local metadata semantics {local_action_semantics!r}. "
+                f"Audit note: {descriptor.audit_note or 'none'}"
+            )
+
+    def _audit_robotwin_action_space(self, data_config: DataConfig) -> ActionSpaceDescriptor:
+        inputs = data_config.data_transforms.inputs
+        if not inputs or not isinstance(inputs[0], aloha_policy.AlohaInputs):
+            raise ValueError("RobotWin multi-dataset configs must start with AlohaInputs.")
+        transform = inputs[0]
+        if transform.adapt_to_pi:
+            return ActionSpaceDescriptor(
+                state_semantics="joint_position",
+                action_semantics="joint_position",
+                state_dim=transform.native_action_dim,
+                action_dim=transform.native_action_dim,
+                canonical_space_id=f"bimanual_joint_position_{transform.native_action_dim}",
+                supports_delta_from_state=True,
+                state_action_alignment_mask=_transforms.make_bool_mask(6, -1, 6, -1),
+                audit_note="RobotWin joint-space layouts can use the shared subtraction delta on joint/gripper-aligned prefixes.",
+            )
+        if transform.native_action_dim == 16:
+            return ActionSpaceDescriptor(
+                state_semantics="ee_pose",
+                action_semantics="ee_pose",
+                state_dim=transform.native_action_dim,
+                action_dim=transform.native_action_dim,
+                canonical_space_id="bimanual_ee_pose_16",
+                supports_delta_from_state=False,
+                audit_note="RobotWin ee16 uses xyz+quaternion pose control; generic subtraction delta is invalid.",
+            )
+        return ActionSpaceDescriptor(
+            state_semantics="joint_position",
+            action_semantics="joint_position",
+            state_dim=transform.native_action_dim,
+            action_dim=transform.native_action_dim,
+            canonical_space_id=f"bimanual_robotwin_{transform.native_action_dim}",
+            supports_delta_from_state=False,
+            audit_note="RobotWin raw semantics could not be normalized to a shared subtraction-compatible delta rule.",
+        )
+
+    def _audit_agibot_action_space(self, data_config: DataConfig) -> ActionSpaceDescriptor:
+        inputs = data_config.data_transforms.inputs
+        if not inputs or not isinstance(inputs[0], agibot_policy.AGIBotInputs):
+            raise ValueError("AgiBot multi-dataset configs must start with AGIBotInputs.")
+        transform = inputs[0]
+        if transform.state_semantics == "ee_pose":
+            return ActionSpaceDescriptor(
+                state_semantics="ee_pose",
+                action_semantics="ee_pose",
+                state_dim=16,
+                action_dim=16,
+                canonical_space_id="bimanual_ee_pose_16",
+                supports_delta_from_state=False,
+                audit_note="AgiBot gripper ee canonicalization uses xyz+quaternion+gripper per arm; generic subtraction delta is invalid.",
+            )
+        if transform.native_action_dim == 22:
+            return ActionSpaceDescriptor(
+                state_semantics="joint_effector_position",
+                action_semantics="joint_effector_position",
+                state_dim=20,
+                action_dim=22,
+                canonical_space_id="agibot_gripper_joint_effector",
+                supports_delta_from_state=True,
+                state_action_alignment_mask=_AGIBOT_GRIPPER_DELTA_MASK,
+                audit_note="Comparable delta block is the shared 14D joint-position prefix; non-comparable tail is masked.",
+            )
+        if transform.native_action_dim == 32:
+            return ActionSpaceDescriptor(
+                state_semantics="joint_effector_position",
+                action_semantics="joint_effector_position",
+                state_dim=30,
+                action_dim=32,
+                canonical_space_id="agibot_dexhand_joint_effector",
+                supports_delta_from_state=True,
+                state_action_alignment_mask=_AGIBOT_DEXHAND_DELTA_MASK,
+                audit_note="Comparable delta block is the shared 14D joint-position prefix; hand/head/waist tails are not delta-compatible.",
+            )
+        raise ValueError(f"Unsupported AgiBot native action dim {transform.native_action_dim}.")
+
+    def _audit_intern_a1_action_space(self, data_config: DataConfig) -> ActionSpaceDescriptor:
+        inputs = data_config.data_transforms.inputs
+        if not inputs or not isinstance(inputs[0], intern_a1_policy.InternA1Inputs):
+            raise ValueError("Intern-A1 multi-dataset configs must start with InternA1Inputs.")
+        transform = inputs[0]
+        if transform.state_semantics == "ee_pose":
+            return ActionSpaceDescriptor(
+                state_semantics="ee_pose",
+                action_semantics="ee_pose",
+                state_dim=intern_a1_policy.CANONICAL_STATE_DIM,
+                action_dim=intern_a1_policy.CANONICAL_ACTION_DIM,
+                canonical_space_id="bimanual_ee_pose_16",
+                supports_delta_from_state=False,
+                audit_note="Intern-A1 ee canonicalization uses ee_to_robot_pose + gripper per arm; generic subtraction delta is invalid.",
+            )
+        return ActionSpaceDescriptor(
+            state_semantics="joint_position",
+            action_semantics="joint_position",
+            state_dim=intern_a1_policy.CANONICAL_STATE_DIM,
+            action_dim=intern_a1_policy.CANONICAL_ACTION_DIM,
+            canonical_space_id="bimanual_joint_position_16",
+            supports_delta_from_state=True,
+            state_action_alignment_mask=_INTERN_A1_DELTA_MASK,
+            audit_note="Intern-A1 canonical state/actions share the same 16D bimanual joint+gripper layout.",
+        )
+
+    def _build_libero_descriptor(
+        self,
+        *,
+        canonicalized: bool,
+        treat_actions_as_commands: bool,
+        action_gripper_format: libero_policy.LiberoActionGripperFormat,
+        dataset_label: str,
+    ) -> ActionSpaceDescriptor:
+        action_semantics = "ee_pose" if canonicalized and treat_actions_as_commands else "ee_pose_command"
+        if canonicalized and treat_actions_as_commands:
+            if action_gripper_format == "absolute_physical_width":
+                audit_note = f"{dataset_label} stores absolute EEF poses and physical gripper widths, canonicalized before the shared delta transform."
+            elif action_gripper_format == "binary_target":
+                audit_note = (
+                    f"{dataset_label} maps raw Cartesian-control xyz/rotation deltas plus binary open-high gripper "
+                    "targets into canonical absolute ee pose targets before the shared canonical delta transform."
+                )
+            else:
+                audit_note = (
+                    f"{dataset_label} maps raw Cartesian-control actions into canonical absolute ee pose targets "
+                    "before the shared canonical delta transform."
+                )
+        elif canonicalized:
+            audit_note = (
+                f"{dataset_label} canonicalizes state/action to xyz+quaternion+gripper, but actions are Cartesian "
+                "control commands rather than subtraction-compatible next-state targets."
+            )
+        else:
+            audit_note = (
+                f"{dataset_label} raw state/action are not subtraction-compatible: state stores two finger "
+                "positions while actions are Cartesian control commands."
+            )
+        return ActionSpaceDescriptor(
+            state_semantics="ee_pose",
+            action_semantics=action_semantics,
+            state_dim=8,
+            action_dim=8 if canonicalized else 7,
+            canonical_space_id="single_arm_ee_pose_gripper_8" if canonicalized else "single_arm_ee_pose_command_raw",
+            supports_delta_from_state=False,
+            audit_note=audit_note,
+        )
+
+    def _audit_libero_action_space(self, data_config: DataConfig, *, dataset_type: str) -> ActionSpaceDescriptor:
+        inputs = data_config.data_transforms.inputs
+        transform = inputs[0] if inputs else None
+        if dataset_type == "libero":
+            if not isinstance(transform, libero_policy.LiberoInputs):
+                raise ValueError("Libero multi-dataset configs must start with LiberoInputs.")
+            return self._build_libero_descriptor(
+                canonicalized=transform.canonicalize_ee_pose_gripper,
+                treat_actions_as_commands=transform.treat_actions_as_commands,
+                action_gripper_format=transform.dataset_action_gripper_format,
+                dataset_label="Libero",
+            )
+        else:
+            if not isinstance(transform, libero_plus_policy.LiberoPlusInputs):
+                raise ValueError("Libero+ multi-dataset configs must start with LiberoPlusInputs.")
+            return self._build_libero_descriptor(
+                canonicalized=transform.canonicalize_ee_pose_gripper,
+                treat_actions_as_commands=transform.treat_actions_as_commands,
+                action_gripper_format="signed_command",
+                dataset_label="Libero+",
+            )
+
+    def _audit_egodex_action_space(self, data_config: DataConfig) -> ActionSpaceDescriptor:
+        inputs = data_config.data_transforms.inputs
+        if not inputs:
+            raise ValueError("EgoDex multi-dataset configs must define data transforms.")
+        egodex_transform = next((transform for transform in inputs if isinstance(transform, egodex_policy.EgoDexInputs)), None)
+        if egodex_transform is None:
+            raise ValueError("EgoDex multi-dataset configs must include EgoDexInputs.")
+        return ActionSpaceDescriptor(
+            state_semantics="hand_pose",
+            action_semantics="hand_pose",
+            state_dim=egodex_transform.action_dim,
+            action_dim=egodex_transform.action_dim,
+            canonical_space_id=f"egodex_hand_pose_{egodex_transform.action_dim}",
+            supports_delta_from_state=False,
+            audit_note="EgoDex delta actions require camera-frame conversion and cannot use the shared subtraction transform.",
+        )
+
+
+@dataclasses.dataclass(frozen=True)
 class TrainConfig:
     # Name of the config. Must be unique. Will be used to reference this config.
     name: tyro.conf.Suppress[str]
@@ -1104,7 +2295,7 @@ def _libero_data(
     use_canonical_ee_delta: bool,
     action_time_start_s: float | None = None,
 ) -> LeRobotLiberoDataConfig:
-    """LIBERO LeRobot dataset used by the released three-stage recipe."""
+    """LIBERO LeRobot dataset used for Stage III fine-tuning."""
     return LeRobotLiberoDataConfig(
         repo_id=_LIBERO_REPO_ID,
         load_norm_stats=not pretrain_world_model,
@@ -1150,6 +2341,20 @@ def _plaw_model(
     )
 
 
+def _pretraining_data(*, world_model_only: bool) -> MultiDatasetPretrainDataConfig:
+    root = pathlib.Path(os.environ.get("DATA_ROOT", pathlib.Path(__file__).resolve().parents[3] / "data/pretrain")).expanduser()
+    sources = [("intern_a1", "intern_a1", 0.20), ("agibotworld", "agibot", 0.30), ("robotwin", "robotwin", 0.15), ("libero", "libero", 0.08 if world_model_only else 0.10)]
+    if world_model_only:
+        sources.append(("egodex", "egodex", 0.15))
+    return MultiDatasetPretrainDataConfig(
+        datasets=tuple(MultiDatasetPretrainDatasetSpec(repo_id=str(root / directory), dataset_type=kind, weight=weight) for directory, kind, weight in sources),
+        use_canonical_delta_actions=not world_model_only,
+        load_norm_stats=not world_model_only,
+        base_config=DataConfig(prompt_from_task=True, action_time_step_s=0.1, action_time_start_s=0.0,
+            world_model=WorldModelDataConfig(history_num_frames=6, future_num_frames=6, frame_stride=None, time_offsets_s=(-1.0, -0.8, -0.6, -0.4, -0.2, 0.0, 0.2, 0.4, 0.6, 0.8, 1.0, 1.2))),
+    )
+
+
 def _stage_train_config(
     name: str,
     *,
@@ -1176,10 +2381,10 @@ def _stage_train_config(
             vjepa2_variant=vjepa2_variant,
         ),
         training_stage=training_stage,
-        data=_libero_data(
-            pretrain_world_model=pretrain_world_model,
-            use_canonical_ee_delta=use_canonical_ee_delta,
-            action_time_start_s=action_time_start_s,
+        data=(
+            _libero_data(pretrain_world_model=False, use_canonical_ee_delta=True, action_time_start_s=action_time_start_s)
+            if name == "stage3_finetuning_libero"
+            else _pretraining_data(world_model_only=pretrain_world_model)
         ),
         batch_size=batch_size,
         num_workers=8,
@@ -1241,6 +2446,15 @@ _CONFIGS = [
         # Match openpi pi05_libero: warmup to 5e-5, then hold that value.
         decay_steps=1_000_000,
         decay_lr=5e-5,
+    ),
+    dataclasses.replace(
+        _stage_train_config("stage3_finetuning_robotwin", training_stage="post_training", pretrain_world_model=False, use_canonical_ee_delta=True, wm_loss_dropout_alpha=0.3, num_train_steps=50_000, batch_size=256, warmup_steps=10_000, action_time_start_s=0.0),
+        data=MultiDatasetPretrainDataConfig(
+            datasets=(MultiDatasetPretrainDatasetSpec(repo_id=str(pathlib.Path(os.environ.get("DATA_ROOT", "data/pretrain")) / "robotwin"), dataset_type="robotwin"),),
+            use_canonical_delta_actions=True,
+            base_config=DataConfig(prompt_from_task=True, action_time_step_s=0.1, action_time_start_s=0.0, world_model=WorldModelDataConfig(history_num_frames=6, future_num_frames=6, frame_stride=None, time_offsets_s=(-1.0, -0.8, -0.6, -0.4, -0.2, 0.0, 0.2, 0.4, 0.6, 0.8, 1.0, 1.2))),
+        ),
+        policy_metadata={"robotwin_action_type": "ee", "robotwin_native_action_dim": 16},
     ),
     TrainConfig(
         name="debug",

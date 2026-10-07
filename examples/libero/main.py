@@ -1,3 +1,5 @@
+# Derived from openpi (Copyright 2024 Physical Intelligence, Inc.; Apache-2.0).
+# Modified for PLaW-VLA by the PLaW-VLA authors, 2026.
 from __future__ import annotations
 
 import collections
@@ -25,7 +27,6 @@ import numpy as np
 import tyro
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[2]
-EXAMPLE_ROOT = pathlib.Path(__file__).resolve().parent
 LIBERO_SRC_ROOT = PROJECT_ROOT / "third_party" / "libero"
 LIBERO_ROOT = LIBERO_SRC_ROOT / "libero" / "libero"
 LIBERO_DATASETS_ROOT = LIBERO_SRC_ROOT / "libero" / "datasets"
@@ -39,7 +40,7 @@ if str(LIBERO_SRC_ROOT) not in sys.path:
 
 
 def _ensure_libero_config() -> None:
-    config_root = pathlib.Path(os.environ.get("LIBERO_CONFIG_PATH", EXAMPLE_ROOT / ".libero")).expanduser()
+    config_root = pathlib.Path(os.environ.get("LIBERO_CONFIG_PATH", "~/.cache/plaw-vla/libero")).expanduser()
     if not config_root.is_absolute():
         config_root = PROJECT_ROOT / config_root
 
@@ -71,14 +72,6 @@ from openpi.serving import policy_input_spec as _policy_input_spec
 
 LIBERO_DUMMY_ACTION = [0.0] * 6 + [-1.0]
 LIBERO_ENV_RESOLUTION = 256
-# Compatibility constants for checkpoints trained against the legacy
-# ``libero_v3_eef`` layout.  That dataset stores the scalar gripper state in
-# metres (roughly 0..0.04) and the action as a signed robosuite command
-# (-1=open, +1=close).  The current policy transform otherwise presents a
-# normalized 0..1 state and reverses that command while decoding it as a
-# canonical gripper delta.
-LEGACY_LIBERO_GRIPPER_OPENNESS_SCALE = 0.04
-LIBERO_GRIPPER_ACTION_INDEX = 6
 TASK_MAX_STEPS = {
     "libero_spatial": 220,
     "libero_object": 280,
@@ -100,32 +93,13 @@ class Args:
     num_steps_wait: int = 10
     num_trials_per_task: int = 50
 
-    # Optional local training-config name. Only used as a fallback to build the policy
-    # input spec when the server's metadata does not include one (e.g. older servers).
-    # In normal operation the spec — including history step offsets and stride — is
-    # sourced from the server's `input_spec` metadata.
-    policy_config: str | None = None
-
     record_video: str = "failure"
     video_out_path: str = "results/libero/videos"
-    seed: int = 7
-
-    # Evaluate checkpoints trained with the legacy ``libero_v3_eef`` gripper
-    # representation.  This is intentionally client-side and opt-in so it
-    # cannot silently alter results for correctly converted datasets.
-    legacy_gripper_compat: bool = False
+    seed: int = 42
 
 
-_SUPPORTED_LIBERO_FRONT_KEYS = {
-    "image",
-    "front_image",
-    "observation/image",
-    "observation/front_image",
-}
-_SUPPORTED_LIBERO_WRIST_KEYS = {
-    "wrist_image",
-    "observation/wrist_image",
-}
+_LIBERO_FRONT_KEY = "observation/image"
+_LIBERO_WRIST_KEY = "observation/wrist_image"
 
 
 def _suppress_warnings() -> None:
@@ -160,9 +134,7 @@ def _lazy_imports():
 
 def preprocess_image(img: np.ndarray, target_size: int) -> np.ndarray:
     img_processed = np.ascontiguousarray(img[::-1, ::-1])
-    return image_tools.convert_to_uint8(
-        image_tools.resize_with_pad(img_processed, target_size, target_size)
-    )
+    return image_tools.convert_to_uint8(image_tools.resize_with_pad(img_processed, target_size, target_size))
 
 
 def _history_buffer_len(step_offsets: Sequence[int]) -> int:
@@ -184,27 +156,11 @@ def _select_temporal_frames(frames: Sequence[np.ndarray], step_offsets: Sequence
     return np.stack([frames[newest_idx + offset] for offset in available_offsets], axis=0)
 
 
-def _load_policy_input_spec(
-    metadata: dict[str, Any],
-    policy_config: str | None,
-) -> _policy_input_spec.PolicyInputSpec:
+def _load_policy_input_spec(metadata: dict[str, Any]) -> _policy_input_spec.PolicyInputSpec:
     input_spec = _policy_input_spec.parse_policy_input_spec(metadata)
-    if input_spec is None and policy_config is not None:
-        try:
-            from openpi.training import config as _config
-
-            input_spec = _policy_input_spec.build_from_train_config(_config.get_config(policy_config))
-        except Exception as exc:
-            raise RuntimeError(
-                "Failed to resolve the local policy_config fallback. "
-                "Use a server started from the updated serve_policy.py, or run the client in an environment "
-                "with the full PLaW-VLA training dependencies installed."
-            ) from exc
     if input_spec is None:
         raise RuntimeError(
-            "Policy server metadata is missing the 'input_spec' field and no --policy-config "
-            "fallback was provided. Restart the server with an updated serve_policy.py, or pass "
-            "--policy-config <train_config_name> so the client can build the spec locally."
+            "Policy server metadata is missing 'input_spec'. Start the server with scripts/serve_policy.py."
         )
 
     if input_spec.family != "libero":
@@ -215,21 +171,25 @@ def _load_policy_input_spec(
             f"got {input_spec.temporal_image_keys}."
         )
     for image_key in input_spec.image_keys:
-        if image_key not in _SUPPORTED_LIBERO_FRONT_KEYS and image_key not in _SUPPORTED_LIBERO_WRIST_KEYS:
+        if image_key not in {_LIBERO_FRONT_KEY, _LIBERO_WRIST_KEY}:
             raise ValueError(f"Unsupported LIBERO image key {image_key!r} in policy input spec.")
     for temporal_key in input_spec.temporal_image_keys:
-        if temporal_key not in _SUPPORTED_LIBERO_FRONT_KEYS:
+        if temporal_key != _LIBERO_FRONT_KEY:
             raise ValueError(
-                "LIBERO evaluation only supports temporal histories for the front camera, "
-                f"got {temporal_key!r}."
+                f"LIBERO evaluation only supports temporal histories for the front camera, got {temporal_key!r}."
             )
+    if not set(input_spec.temporal_image_keys).issubset(input_spec.image_keys):
+        raise ValueError("Temporal image keys must be included in image_keys.")
+    offsets = input_spec.history_step_offsets
+    if input_spec.temporal_image_keys and (not offsets or offsets[-1] != 0 or offsets != tuple(sorted(set(offsets)))):
+        raise ValueError("History step offsets must be strictly increasing and end in zero.")
 
-    if input_spec.state_gripper_format not in {None, "two_finger_qpos"}:
+    if input_spec.state_gripper_format != "two_finger_qpos":
         raise ValueError(
             "Policy/client LIBERO state gripper contract mismatch: server expects "
             f"{input_spec.state_gripper_format!r}, client provides 'two_finger_qpos'."
         )
-    if input_spec.action_gripper_format not in {None, "signed_command"}:
+    if input_spec.action_gripper_format != "signed_command":
         raise ValueError(
             "Policy/client LIBERO action gripper contract mismatch: server returns "
             f"{input_spec.action_gripper_format!r}, environment expects 'signed_command'."
@@ -239,35 +199,11 @@ def _load_policy_input_spec(
 
 
 def _libero_image_for_key(key: str, front_image: np.ndarray, wrist_image: np.ndarray) -> np.ndarray:
-    if key in _SUPPORTED_LIBERO_WRIST_KEYS:
+    if key == _LIBERO_WRIST_KEY:
         return wrist_image
-    if key in _SUPPORTED_LIBERO_FRONT_KEYS:
+    if key == _LIBERO_FRONT_KEY:
         return front_image
     raise ValueError(f"Unsupported LIBERO image key {key!r}.")
-
-
-def _legacy_gripper_state_for_policy(robot_state: np.ndarray) -> np.ndarray:
-    """Make online LIBERO state match the legacy checkpoint's training scale.
-
-    The server canonicalizes the two finger positions by collapsing them and
-    dividing by 0.04.  Scaling both raw finger positions by 0.04 here cancels
-    that division, so the server receives the 0..0.04 scalar used to compute
-    this checkpoint's normalization statistics.
-    """
-    state = np.asarray(robot_state, dtype=np.float32).copy()
-    if state.ndim != 1 or state.shape[0] < 8:
-        raise ValueError(f"Expected LIBERO robot state with at least 8 values, got {state.shape}.")
-    state[-2:] *= LEGACY_LIBERO_GRIPPER_OPENNESS_SCALE
-    return state
-
-
-def _legacy_gripper_actions_for_env(action_chunk: np.ndarray) -> np.ndarray:
-    """Restore the signed robosuite gripper command learned by the checkpoint."""
-    actions = np.asarray(action_chunk).copy()
-    if actions.ndim != 2 or actions.shape[1] <= LIBERO_GRIPPER_ACTION_INDEX:
-        raise ValueError(f"Expected LIBERO action chunk shaped [horizon, >=7], got {actions.shape}.")
-    actions[:, LIBERO_GRIPPER_ACTION_INDEX] *= -1
-    return actions
 
 
 def run_single_episode(
@@ -287,11 +223,8 @@ def run_single_episode(
 
     max_steps = TASK_MAX_STEPS.get(args.task_suite_name, 300)
 
-    # During warm-up we step the simulator with a no-op action so gravity, contacts, etc.
-    # settle. We also feed every settled observation into the history queue so that the
-    # first real inference call sees a full-length history that matches the training
-    # distribution (training always provides `history_num_frames` valid frames; without
-    # this pre-fill the first 2 infers would see only 1 / 3 frames).
+    # Let contacts settle while collecting history at the simulator timestep.
+    # The policy samples this buffer at its declared history step offsets.
     for _ in range(args.num_steps_wait):
         obs, _, _, _ = env.step(LIBERO_DUMMY_ACTION)
         queue_image_history.append(preprocess_image(obs["agentview_image"], 256))
@@ -314,9 +247,6 @@ def run_single_episode(
                         obs["robot0_gripper_qpos"],
                     )
                 )
-                if args.legacy_gripper_compat:
-                    robot_state = _legacy_gripper_state_for_policy(robot_state)
-
                 request = {}
                 temporal_keys = set(input_spec.temporal_image_keys)
                 for image_key in input_spec.image_keys:
@@ -333,13 +263,15 @@ def run_single_episode(
                     request[input_spec.prompt_key] = task_description
 
                 action_chunk = np.asarray(client.infer(request)["actions"])
-                if action_chunk.ndim != 2 or action_chunk.shape[1] < len(LIBERO_DUMMY_ACTION):
+                if (
+                    action_chunk.ndim != 2
+                    or action_chunk.shape[0] == 0
+                    or action_chunk.shape[1] != len(LIBERO_DUMMY_ACTION)
+                ):
                     raise ValueError(
                         "Policy server returned invalid action chunk shape "
-                        f"{action_chunk.shape}; expected [horizon, >= {len(LIBERO_DUMMY_ACTION)}]."
+                        f"{action_chunk.shape}; expected [positive horizon, {len(LIBERO_DUMMY_ACTION)}]."
                     )
-                if args.legacy_gripper_compat:
-                    action_chunk = _legacy_gripper_actions_for_env(action_chunk)
                 action_plan.extend(action_chunk[: args.replan_steps])
 
             action = action_plan.popleft()
@@ -362,7 +294,6 @@ def run_single_episode(
 
 
 def _episode_worker(
-    task_suite_name: str,
     task_bddl_file: str,
     task_description: str,
     initial_state: np.ndarray,
@@ -387,7 +318,7 @@ def _episode_worker(
         )
         env.seed(args.seed)
         client = _websocket_client_policy.WebsocketClientPolicy(host, port)
-        input_spec = _load_policy_input_spec(client.get_server_metadata(), args.policy_config)
+        input_spec = _load_policy_input_spec(client.get_server_metadata())
 
         is_success, replay_images = run_single_episode(
             env=env,
@@ -401,8 +332,10 @@ def _episode_worker(
         del env
         gc.collect()
 
-        should_save = bool(video_path) and replay_images and (
-            args.record_video == "all" or (args.record_video == "failure" and not is_success)
+        should_save = (
+            bool(video_path)
+            and replay_images
+            and (args.record_video == "all" or (args.record_video == "failure" and not is_success))
         )
         if should_save:
             imageio.mimwrite(video_path, [np.asarray(x) for x in replay_images], fps=10, macro_block_size=1)
@@ -431,7 +364,6 @@ def _run_episode_in_subprocess(
     proc = ctx.Process(
         target=_episode_worker,
         args=(
-            task_suite_name,
             str(task_bddl_file),
             task_description,
             initial_state,
@@ -458,21 +390,16 @@ def _run_episode_in_subprocess(
     if result_queue.empty():
         return False
 
-    result = result_queue.get_nowait()
-    # Accept the historical bool payload for compatibility with older workers.
-    if isinstance(result, tuple):
-        is_success, error_text = result
-        if error_text:
-            _log("[ERROR] Episode subprocess failed:\n" + error_text.rstrip())
-        return bool(is_success)
-    return bool(result)
+    is_success, error_text = result_queue.get_nowait()
+    if error_text:
+        _log("[ERROR] Episode subprocess failed:\n" + error_text.rstrip())
+    return bool(is_success)
 
 
 def eval_libero(args: Args) -> None:
     if not (LIBERO_SRC_ROOT / "libero").is_dir():
         raise FileNotFoundError(
-            f"LIBERO submodule is missing at {LIBERO_SRC_ROOT}. "
-            "Run: git submodule update --init --recursive"
+            f"LIBERO submodule is missing at {LIBERO_SRC_ROOT}. Run: git submodule update --init --recursive"
         )
     mp.set_start_method("spawn", force=True)
     np.random.seed(args.seed)
@@ -488,23 +415,9 @@ def eval_libero(args: Args) -> None:
 
     client = _websocket_client_policy.WebsocketClientPolicy(args.host, args.port)
     server_metadata = client.get_server_metadata()
-    input_spec = _load_policy_input_spec(server_metadata, args.policy_config)
-    legacy_required = bool(server_metadata.get("legacy_gripper_compat_required", False))
-    if legacy_required != args.legacy_gripper_compat:
-        required_flag = "--legacy-gripper-compat" if legacy_required else "--no-legacy-gripper-compat"
-        raise RuntimeError(
-            "Policy/client legacy gripper mode mismatch: "
-            f"server legacy_required={legacy_required}, client legacy_enabled={args.legacy_gripper_compat}. "
-            f"Restart the client with {required_flag}."
-        )
+    input_spec = _load_policy_input_spec(server_metadata)
     _log(f"Server metadata: {server_metadata}")
     _log(f"Resolved policy input spec: {input_spec}")
-    if args.legacy_gripper_compat:
-        _log(
-            "[compat] legacy LIBERO gripper mode enabled: policy state uses the training-time "
-            "0..0.04 scale and decoded gripper commands are sign-corrected."
-        )
-
     benchmark_dict = benchmark.get_benchmark_dict()
     if args.task_suite_name not in benchmark_dict:
         raise ValueError(f"Unknown task suite: {args.task_suite_name}")
