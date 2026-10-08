@@ -285,8 +285,21 @@ main() {
 
     echo ""
     echo "Done. Files are in: $OUTPUT_DIR"
-    echo "Next step (from repo root):"
-    echo "  uv run --project examples/egodex examples/egodex/convert_egodex_to_lerobot.py --data-dir $OUTPUT_DIR --output-dir data/pretrain/egodex"
+    local training_splits=()
+    local item
+    for item in "${DOWNLOADS[@]}"; do
+        if [[ "$item" =~ ^part[1-5]$ ]]; then
+            training_splits+=("$item")
+        fi
+    done
+    if ((${#training_splits[@]})); then
+        echo "Next step (from repo root, for downloaded training splits):"
+        printf '  uv run --project examples/egodex --frozen python examples/egodex/convert_egodex_to_lerobot.py --data-dir %q --output-dir data/pretrain/egodex --subdirs' "$OUTPUT_DIR"
+        printf ' %s' "${training_splits[@]}"
+        printf '\n'
+    else
+        echo "Select training splits explicitly with --subdirs when preparing pretraining data."
+    fi
 }
 
 main

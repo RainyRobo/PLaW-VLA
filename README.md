@@ -133,7 +133,9 @@ Start the policy server using a Stage III checkpoint step directory that contain
   --policy.dir=/path/to/libero/checkpoint/step
 ```
 
-Run the client in another terminal:
+Inference uses eager execution by default. To enable PyTorch compilation, prefix the server command with `TORCH_COMPILE_MODE=max-autotune` and pass `--inference-timeout 600` to the client to allow for the first compilation.
+
+Wait for the server's listening message, then run the client in another terminal:
 
 ```bash
 MUJOCO_GL=egl uv run --project examples/libero --frozen python examples/libero/main.py \

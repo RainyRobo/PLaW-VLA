@@ -14,6 +14,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${ROOT}/scripts/train_common.sh"
 
 CONFIG="${CONFIG:-stage1_world_model_pretraining}"
+if train_help_requested "$@"; then
+  exec "$(train_python)" "${ROOT}/scripts/train_pytorch.py" "${CONFIG}" "$@"
+fi
 EXP_NAME="${EXP_NAME:-${CONFIG}}"
 CHECKPOINT_DIR="${CHECKPOINT_DIR:-${ROOT}/checkpoints}"
 

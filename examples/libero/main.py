@@ -407,15 +407,27 @@ def _run_episode_in_subprocess(
     try:
         proc.start()
         started = True
-        proc.join(timeout=timeout)
+        deadline = time.monotonic() + timeout
+        # Drain the queue while the worker runs. A large traceback can fill its
+        # pipe and keep the worker's feeder thread alive until the parent reads.
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"LIBERO episode exceeded its {timeout}s subprocess timeout.")
+            try:
+                is_success, error_text = result_queue.get(timeout=min(0.1, remaining))
+                break
+            except queue.Empty as exc:
+                if proc.is_alive():
+                    continue
+                if proc.exitcode != 0:
+                    raise RuntimeError(f"LIBERO episode subprocess exited with code {proc.exitcode}.") from exc
+                raise RuntimeError("LIBERO episode subprocess exited without reporting a result.") from exc
+        proc.join(timeout=max(0, deadline - time.monotonic()))
         if proc.is_alive():
             raise TimeoutError(f"LIBERO episode exceeded its {timeout}s subprocess timeout.")
         if proc.exitcode != 0:
             raise RuntimeError(f"LIBERO episode subprocess exited with code {proc.exitcode}.")
-        try:
-            is_success, error_text = result_queue.get(timeout=1.0)
-        except queue.Empty as exc:
-            raise RuntimeError("LIBERO episode subprocess exited without reporting a result.") from exc
         if error_text:
             raise RuntimeError("LIBERO episode subprocess failed:\n" + error_text.rstrip())
         return bool(is_success)
@@ -455,7 +467,7 @@ def eval_libero(args: Args) -> None:
     _validate_args(args)
     if not (LIBERO_SRC_ROOT / "libero").is_dir():
         raise FileNotFoundError(
-            f"LIBERO submodule is missing at {LIBERO_SRC_ROOT}. Run: git submodule update --init --recursive"
+            f"LIBERO submodule is missing at {LIBERO_SRC_ROOT}. Run: git submodule update --init third_party/libero"
         )
     mp.set_start_method("spawn", force=True)
     np.random.seed(args.seed)

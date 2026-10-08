@@ -166,12 +166,12 @@ def _log_model_init_progress(stop_event: threading.Event, interval_seconds: floa
         )
 
 
-def set_seed(seed: int, local_rank: int):
-    torch.manual_seed(seed + local_rank)
-    np.random.seed((seed + local_rank) % 2**32)
-    random.seed(seed + local_rank)
+def set_seed(seed: int, rank: int):
+    torch.manual_seed(seed + rank)
+    np.random.seed((seed + rank) % 2**32)
+    random.seed(seed + rank)
     if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed + local_rank)
+        torch.cuda.manual_seed_all(seed + rank)
 
 
 def build_datasets(config: _config.TrainConfig, *, checkpoint_assets: pathlib.Path | None = None):
@@ -494,6 +494,22 @@ def _sample_batch_from_existing_loader(
     return _model.Observation.from_dict(batch), batch.get("actions")
 
 
+def _wandb_image(frame: torch.Tensor | np.ndarray) -> np.ndarray:
+    """Convert a channels-first or channels-last policy image to uint8 RGB."""
+    frame = frame.detach().cpu().numpy() if isinstance(frame, torch.Tensor) else np.asarray(frame)
+    if frame.ndim != 3:
+        raise ValueError(f"Expected a 3D RGB frame, got {frame.shape}.")
+    if frame.shape[-1] != 3:
+        if frame.shape[0] != 3:
+            raise ValueError(f"Expected three RGB channels, got {frame.shape}.")
+        frame = np.moveaxis(frame, 0, -1)
+    if np.issubdtype(frame.dtype, np.floating):
+        # Policy images are normalized to [-1, 1], including bright frames
+        # whose pixels happen to be entirely nonnegative.
+        frame = (frame + 1.0) * 127.5
+    return np.clip(frame, 0, 255).astype(np.uint8)
+
+
 def log_sample_images_to_wandb(sample_batch: tuple[_model.Observation, _model.Actions]):
     """Log sample batch images to wandb for visualization.
 
@@ -513,24 +529,12 @@ def log_sample_images_to_wandb(sample_batch: tuple[_model.Observation, _model.Ac
 
     for key, img in sample_batch["image"].items():
         if img.ndim == 4:
-            # Current frame (B, C, H, W)
-            frame = img[sample_idx].permute(1, 2, 0).cpu().numpy()
-            # Denormalize if needed (assuming [-1, 1] -> [0, 255])
-            if frame.min() < 0:
-                frame = (frame + 1.0) / 2.0 * 255.0
-            frame = frame.clip(0, 255).astype(np.uint8)
+            frame = _wandb_image(img[sample_idx])
             single_frame_images[key] = frame
 
         elif img.ndim == 5:
-            # Temporal sequence (B, T, C, H, W)
             num_frames = img.shape[1]
-            frames = []
-            for t in range(num_frames):
-                frame = img[sample_idx, t].permute(1, 2, 0).cpu().numpy()
-                if frame.min() < 0:
-                    frame = (frame + 1.0) / 2.0 * 255.0
-                frame = frame.clip(0, 255).astype(np.uint8)
-                frames.append(frame)
+            frames = [_wandb_image(img[sample_idx, t]) for t in range(num_frames)]
 
             # Horizontal concatenation for temporal visualization
             concat_img = np.concatenate(frames, axis=1)
@@ -548,8 +552,8 @@ def log_sample_images_to_wandb(sample_batch: tuple[_model.Observation, _model.Ac
         )
 
     # Log action statistics for verification
-    if "actions" in sample_batch and sample_batch["actions"] is not None:
-        action_tensor = sample_batch["actions"][sample_idx]  # (action_horizon, action_dim)
+    if actions is not None:
+        action_tensor = actions[sample_idx]  # (action_horizon, action_dim)
         log_dict["data/action_mean"] = action_tensor.mean().item()
         log_dict["data/action_std"] = action_tensor.std().item()
         log_dict["data/action_range"] = (action_tensor.max() - action_tensor.min()).item()
@@ -639,9 +643,10 @@ def _load_pytorch_weights(model: torch.nn.Module, model_path: str, *, training_s
 
 
 def train_loop(config: _config.TrainConfig):
-    use_ddp, local_rank, device = setup_ddp()
+    use_ddp, _local_rank, device = setup_ddp()
     is_main = (not use_ddp) or (dist.get_rank() == 0)
-    set_seed(config.seed, local_rank)
+    rank = dist.get_rank() if use_ddp else 0
+    set_seed(config.seed, rank)
 
     if not config.resume and not config.overwrite:
         # Rank 0 checks before creating the directory, then shares the result so

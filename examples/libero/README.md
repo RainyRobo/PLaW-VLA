@@ -35,6 +35,8 @@ By default, the client evaluates every task in the selected suite with 50 trials
 
 Wait for the server's listening message before starting evaluation. `--connect-timeout` and `--inference-timeout` adjust the connection and response waits in seconds; defaults are 30 and 60, respectively.
 
+The server uses eager execution by default. For compiled inference, prefix its command with `TORCH_COMPILE_MODE=max-autotune` and set `--inference-timeout 600` on the client; the first inference includes compilation.
+
 For systems using an X display instead of EGL, set `MUJOCO_GL=glx`.
 
 ## Batch evaluation

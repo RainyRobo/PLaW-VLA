@@ -10,8 +10,11 @@ The output contains:
 - ``action`` (7D controller command with a signed gripper value)
 
 Use a custom ``TrainConfig`` that matches these raw features and declares
-``dataset_action_gripper_format="signed_command"``. The canonical EEF recipe
-uses a different layout; see ``docs/data.md`` for the HDF5 converter.
+``dataset_state_input_format="two_finger_qpos"`` and
+``dataset_action_gripper_format="signed_command"``. Query the first action at
+the current observation timestamp. ``converted_libero_data`` provides these
+settings. The canonical EEF recipe uses a different layout; see ``docs/data.md``
+for the HDF5 converter.
 
 Usage:
 
@@ -85,23 +88,24 @@ def convert_libero(data_dir: str, output_dir: pathlib.Path) -> pathlib.Path:
         image_writer_processes=5,
     )
 
-    for raw_dataset_name in RAW_DATASET_NAMES:
-        raw_dataset = tfds.load(raw_dataset_name, data_dir=data_dir, split="train")
-        for episode in raw_dataset:
-            for step in episode["steps"].as_numpy_iterator():
-                dataset.add_frame(
-                    {
-                        "observation.images.image": step["observation"]["image"],
-                        "observation.images.wrist_image": step["observation"]["wrist_image"],
-                        "observation.state": np.asarray(step["observation"]["state"], dtype=np.float32),
-                        "action": np.asarray(step["action"], dtype=np.float32),
-                        "task": _language_instruction(step["language_instruction"]),
-                    }
-                )
-            dataset.save_episode()
-
-    dataset.stop_image_writer()
-    dataset.finalize()
+    try:
+        for raw_dataset_name in RAW_DATASET_NAMES:
+            raw_dataset = tfds.load(raw_dataset_name, data_dir=data_dir, split="train")
+            for episode in raw_dataset:
+                for step in episode["steps"].as_numpy_iterator():
+                    dataset.add_frame(
+                        {
+                            "observation.images.image": step["observation"]["image"],
+                            "observation.images.wrist_image": step["observation"]["wrist_image"],
+                            "observation.state": np.asarray(step["observation"]["state"], dtype=np.float32),
+                            "action": np.asarray(step["action"], dtype=np.float32),
+                            "task": _language_instruction(step["language_instruction"]),
+                        }
+                    )
+                dataset.save_episode()
+        dataset.finalize()
+    finally:
+        dataset.stop_image_writer()
 
     return output_dir
 

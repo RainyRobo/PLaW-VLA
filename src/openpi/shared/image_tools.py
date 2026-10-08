@@ -72,19 +72,19 @@ def resize_with_pad_torch(
     Returns:
         Resized and padded tensor with same shape format as input
     """
+    if images.ndim < 3:
+        raise ValueError(f"Expected at least three image dimensions, got {tuple(images.shape)}")
+    batch_shape = images.shape[:-3]
+    images = images.reshape(-1, *images.shape[-3:])
     # Check if input is in channels-last format [*b, h, w, c] or channels-first [*b, c, h, w]
     if images.shape[-1] <= 4:  # Assume channels-last format
         channels_last = True
         # Convert to channels-first for torch operations
-        if images.dim() == 3:
-            images = images.unsqueeze(0)  # Add batch dimension
         images = images.permute(0, 3, 1, 2)  # [b, h, w, c] -> [b, c, h, w]
     else:
         channels_last = False
-        if images.dim() == 3:
-            images = images.unsqueeze(0)  # Add batch dimension
 
-    batch_size, channels, cur_height, cur_width = images.shape
+    _, _, cur_height, cur_width = images.shape
 
     # Calculate resize ratio
     ratio = max(cur_width / width, cur_height / height)
@@ -122,7 +122,5 @@ def resize_with_pad_torch(
     # Convert back to original format if needed
     if channels_last:
         padded_images = padded_images.permute(0, 2, 3, 1)  # [b, c, h, w] -> [b, h, w, c]
-        if batch_size == 1 and images.shape[0] == 1:
-            padded_images = padded_images.squeeze(0)  # Remove batch dimension if it was added
 
-    return padded_images
+    return padded_images.reshape(*batch_shape, *padded_images.shape[-3:])

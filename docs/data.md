@@ -94,7 +94,7 @@ uv run --project scripts/data --frozen python examples/libero/convert_libero_to_
 
 The default converts 20 Hz demonstrations to 10 Hz. It writes 8D absolute EEF states and next-sample EEF action targets, with scalar-first quaternions and physical gripper widths. Images are rotated to match the LIBERO inference client. Actions are converted to deltas from the current state by the Stage II training transforms. Set `--source-fps` and `--fps` only when they match your source data.
 
-[`convert_libero_data_to_lerobot.py`](../examples/libero/convert_libero_data_to_lerobot.py) separately demonstrates raw RLDS conversion. It requires TensorFlow/TensorFlow Datasets and writes signed 7D controller commands; that output needs a matching custom data config and is not interchangeable with the LIBERO EEF output. The provided Stage III recipe instead downloads [the prepared LIBERO EEF dataset](https://huggingface.co/datasets/RainyBot/libero_v3_eef).
+[`convert_libero_data_to_lerobot.py`](../examples/libero/convert_libero_data_to_lerobot.py) separately demonstrates raw RLDS conversion. It requires TensorFlow/TensorFlow Datasets and writes signed 7D controller commands; that output needs a matching custom data config and is not interchangeable with the LIBERO EEF output. Use `converted_libero_data(repo_id, asset_id)` from [config.py](../src/openpi/training/config.py) in a custom recipe to declare its raw state and signed-command conventions. The provided Stage III recipe instead downloads [the prepared LIBERO EEF dataset](https://huggingface.co/datasets/RainyBot/libero_v3_eef).
 
 ## EgoDex
 

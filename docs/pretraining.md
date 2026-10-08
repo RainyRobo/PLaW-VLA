@@ -75,7 +75,7 @@ Alternatively set `STAGE3_INIT_WEIGHT=/path/to/stage2/checkpoint/step`. The wrap
 
 ## Training options and outputs
 
-`NUM_GPUS` defaults to `torch.cuda.device_count()` and respects `CUDA_VISIBLE_DEVICES`. It must not exceed the visible device count and must divide the total batch size, including a `--batch-size` override. Adjust the batch size for the available GPU memory. Every wrapper forwards additional arguments to `scripts/train_pytorch.py`; inspect that script's `--help` for options such as `--num-train-steps`, `--resume`, and `--no-wandb-enabled`.
+`NUM_GPUS` defaults to `torch.cuda.device_count()` and respects `CUDA_VISIBLE_DEVICES`. It must not exceed the visible device count and must divide the total batch size, including a `--batch-size` override. Adjust the batch size for the available GPU memory. Every wrapper forwards additional arguments to `scripts/train_pytorch.py`. Pass `--help` to any wrapper to view its training options without downloading resources or starting training, including `--num-train-steps`, `--resume`, and `--no-wandb-enabled`.
 
 `CONFIG` and `EXP_NAME` select a recipe and experiment name. `CHECKPOINT_DIR` changes the checkpoint root (default `checkpoints/`). With the example names above, step directories are saved under:
 

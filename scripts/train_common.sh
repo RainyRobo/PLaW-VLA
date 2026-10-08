@@ -22,6 +22,14 @@ train_torchrun() {
   fi
 }
 
+train_help_requested() {
+  local arg
+  for arg in "$@"; do
+    if [[ "${arg}" == --help || "${arg}" == -h ]]; then return 0; fi
+  done
+  return 1
+}
+
 require_divisible_batch() {
   local config_name="$1"
   local num_gpus="$2"

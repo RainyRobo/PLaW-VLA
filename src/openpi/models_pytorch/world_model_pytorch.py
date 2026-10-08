@@ -191,6 +191,12 @@ class VJepa2Adapter(nn.Module):
             nn.Linear(hidden_dim, out_dim),
         )
 
+    def train(self, mode: bool = True):
+        super().train(mode)
+        # Keep latent targets deterministic while the input projector trains.
+        self._vjepa2_model.eval()
+        return self
+
     def apply_input_projector(self, tokens: Tensor) -> Tensor:
         """Project raw V-JEPA2 tokens to the world-model expert width.
 

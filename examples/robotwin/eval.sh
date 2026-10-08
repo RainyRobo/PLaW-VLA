@@ -217,16 +217,30 @@ echo "============================================================"
 # ---------------- optional: spawn the policy server -------------------------
 SERVER_PID=""
 declare -A GPU_PID
+stop_process_group() {
+    local pid="$1"
+    local attempt
+    kill -TERM -- "-${pid}" 2>/dev/null || true
+    # The launching PID may not have entered its new session yet.
+    kill -TERM "${pid}" 2>/dev/null || true
+    for attempt in {1..20}; do
+        if ! kill -0 -- "-${pid}" 2>/dev/null; then
+            return
+        fi
+        sleep 0.1
+    done
+    kill -KILL -- "-${pid}" 2>/dev/null || true
+}
 cleanup() {
     for pid in "${GPU_PID[@]}"; do
-        kill "${pid}" 2>/dev/null || true
+        stop_process_group "${pid}"
     done
     for pid in "${GPU_PID[@]}"; do
         wait "${pid}" 2>/dev/null || true
     done
-    if [[ -n "${SERVER_PID}" ]] && kill -0 "${SERVER_PID}" 2>/dev/null; then
+    if [[ -n "${SERVER_PID}" ]]; then
         echo "[eval] stopping server pid=${SERVER_PID}"
-        kill "${SERVER_PID}" 2>/dev/null || true
+        stop_process_group "${SERVER_PID}"
         wait "${SERVER_PID}" 2>/dev/null || true
     fi
 }
@@ -240,7 +254,7 @@ if [[ -n "${SERVER_GPU}" ]]; then
     CUDA_VISIBLE_DEVICES="${SERVER_GPU}" \
         POLICY_PORT="${SERVER_PORT}" \
         POLICY_DIR="${POLICY_DIR}" \
-        bash "${SCRIPT_DIR}/launch_server.sh" \
+        setsid bash "${SCRIPT_DIR}/launch_server.sh" \
         > "${SERVER_LOG}" 2>&1 &
     SERVER_PID=$!
     echo "[eval] server pid=${SERVER_PID}; waiting for readiness (TCP ${SERVER_HOST}:${SERVER_PORT}) ..."
@@ -283,7 +297,7 @@ dispatch() {
         if [[ -n "${ROBOTWIN_ASSET_ID:-}" ]]; then
             export ROBOTWIN_ASSET_ID
         fi
-        exec bash "${SCRIPT_DIR}/launch_client.sh" "${task_save}" "${task}"
+        exec setsid bash "${SCRIPT_DIR}/launch_client.sh" "${task_save}" "${task}"
     ) > "${log}" 2>&1 &
     GPU_PID[${gpu}]=$!
 }
@@ -301,7 +315,7 @@ done
 TOTAL_OK=0
 TOTAL_FAIL=0
 while (( TOTAL_OK + TOTAL_FAIL < ${#TASK_ARR[@]} )); do
-    sleep 5
+    sleep 1
     for gpu in "${GPU_ARR[@]}"; do
         pid="${GPU_PID[${gpu}]:-}"
         if [[ -z "${pid}" ]]; then continue; fi
@@ -313,6 +327,7 @@ while (( TOTAL_OK + TOTAL_FAIL < ${#TASK_ARR[@]} )); do
                 TOTAL_FAIL=$((TOTAL_FAIL + 1))
                 echo "[eval] GPU ${gpu} child pid=${pid} FAILED" >&2
             fi
+            stop_process_group "${pid}"
             unset 'GPU_PID[${gpu}]'
             if (( TASK_IDX < ${#TASK_ARR[@]} )); then
                 dispatch "${gpu}" "${TASK_ARR[$TASK_IDX]}"

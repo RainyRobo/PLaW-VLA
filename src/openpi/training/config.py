@@ -2365,12 +2365,14 @@ def converted_libero_data(repo_id: str, asset_id: str) -> LeRobotLiberoDataConfi
         assets=AssetsConfig(asset_id=asset_id),
         canonicalize_ee_pose_gripper=True,
         treat_actions_as_commands=True,
+        dataset_state_input_format="two_finger_qpos",
         dataset_state_gripper_format="physical_width",
         dataset_action_gripper_format="signed_command",
         use_canonical_ee_delta=True,
         base_config=DataConfig(
             prompt_from_task=True,
             action_time_step_s=0.1,
+            action_time_start_s=0.0,
             world_model=WorldModelDataConfig(
                 image_keys=("observation.images.image",),
                 frame_stride=None,
@@ -2566,21 +2568,6 @@ _CONFIGS = [
         num_train_steps=10,
         overwrite=True,
         exp_name="debug_pi05",
-        wandb_enabled=False,
-    ),
-    TrainConfig(
-        name="debug_pi05_world_model",
-        model=pi0_config.Pi0Config(
-            pi05=True,
-            paligemma_variant="dummy",
-            action_expert_variant="dummy",
-            world_model_expert_variant="dummy",
-        ),
-        data=FakeDataConfig(),
-        batch_size=2,
-        num_train_steps=10,
-        overwrite=True,
-        exp_name="debug_pi05_world_model",
         wandb_enabled=False,
     ),
 ]

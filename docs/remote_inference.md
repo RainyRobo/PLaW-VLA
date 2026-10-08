@@ -41,6 +41,8 @@ with websocket_client_policy.WebsocketClientPolicy(host="localhost", port=8001) 
 
 The client waits up to 30 seconds to connect and 60 seconds for an inference response. Set `connect_timeout` and `inference_timeout` when constructing it to adjust these limits. The LIBERO and LIBERO-Plus clients expose the corresponding `--connect-timeout` and `--inference-timeout` options. The context manager closes the connection when the block exits.
 
+The server uses eager execution by default. To enable PyTorch compilation, prefix its command with `TORCH_COMPILE_MODE=max-autotune` and construct the client with `inference_timeout=600` to allow for compilation during the first inference.
+
 Images should match the training orientation and can be resized with `openpi_client.image_tools.resize_with_pad`. Normalization happens on the server. Construct temporal history at the published offsets rather than repeating a guessed number of frames. The [LIBERO client](../examples/libero/main.py) provides a complete implementation, including episode boundaries and action conversion.
 
 The response is an action chunk. Execute only the selected replanning window before sending the next observation. Interpret actions using the benchmark adapter and the published gripper contract; they are not a universal robot control format.

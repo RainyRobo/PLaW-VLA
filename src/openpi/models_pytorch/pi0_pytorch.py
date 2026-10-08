@@ -3,20 +3,21 @@
 import logging
 import math
 import os
+
 import torch
 from torch import Tensor
 from torch import nn
 import torch.nn.functional as F  # noqa: N812
+
 import openpi.models.gemma as _gemma
 from openpi.models_pytorch.gemma_pytorch import PaliGemmaWithExpertModel
 import openpi.models_pytorch.preprocessing_pytorch as _preprocessing
-from openpi.models_pytorch.world_model_pytorch import (
-    VJepa2Adapter,
-    WorldModelConfig,
-    WorldModelEmbeddings,
-    WorldModelFutureSlotBuilder,
-    WorldModelPredictorHead,
-)
+from openpi.models_pytorch.world_model_pytorch import VJepa2Adapter
+from openpi.models_pytorch.world_model_pytorch import WorldModelConfig
+from openpi.models_pytorch.world_model_pytorch import WorldModelEmbeddings
+from openpi.models_pytorch.world_model_pytorch import WorldModelFutureSlotBuilder
+from openpi.models_pytorch.world_model_pytorch import WorldModelPredictorHead
+
 
 def get_safe_dtype(target_dtype, device_type):
     """Get a safe dtype for the given device type."""
@@ -222,6 +223,12 @@ def _zero_last_step_collapse_metrics(device: torch.device) -> dict[str, Tensor]:
 class PI0Pytorch(nn.Module):
     def __init__(self, config):
         super().__init__()
+        compile_mode = os.environ.get("TORCH_COMPILE_MODE", "none")
+        if compile_mode not in {"none", "default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs"}:
+            raise ValueError(
+                f"Unsupported TORCH_COMPILE_MODE={compile_mode!r}. Use none, default, "
+                "reduce-overhead, max-autotune, or max-autotune-no-cudagraphs."
+            )
         msg = "Transformers patch is missing or incompatible. Run `bash scripts/install_transformers_patch.sh`."
         try:
             from transformers.models.siglip import check
@@ -289,14 +296,14 @@ class PI0Pytorch(nn.Module):
             self.world_future_builder = None
             self.world_pred_head = None
 
-        self.action_in_proj = nn.Linear(32, action_expert_config.width)
-        self.action_out_proj = nn.Linear(action_expert_config.width, 32)
+        self.action_in_proj = nn.Linear(config.action_dim, action_expert_config.width)
+        self.action_out_proj = nn.Linear(action_expert_config.width, config.action_dim)
 
         if self.pi05:
             self.time_mlp_in = nn.Linear(action_expert_config.width, action_expert_config.width)
             self.time_mlp_out = nn.Linear(action_expert_config.width, action_expert_config.width)
         else:
-            self.state_proj = nn.Linear(32, action_expert_config.width)
+            self.state_proj = nn.Linear(config.action_dim, action_expert_config.width)
             self.action_time_mlp_in = nn.Linear(2 * action_expert_config.width, action_expert_config.width)
             self.action_time_mlp_out = nn.Linear(action_expert_config.width, action_expert_config.width)
 
@@ -338,9 +345,9 @@ class PI0Pytorch(nn.Module):
             self.world_model_adapter.encoder_module.to(dtype=torch.float32)
 
         torch.set_float32_matmul_precision("high")
-        compile_mode = os.environ.get("TORCH_COMPILE_MODE", "max-autotune")
-        logging.info("Compiling PI0Pytorch.sample_actions with torch.compile(mode=%s)", compile_mode)
-        self.sample_actions = torch.compile(self.sample_actions, mode=compile_mode)
+        if compile_mode != "none":
+            logging.info("Compiling PI0Pytorch.sample_actions with torch.compile(mode=%s)", compile_mode)
+            self.sample_actions = torch.compile(self.sample_actions, mode=compile_mode)
 
         # Initialize gradient checkpointing flag
         self.gradient_checkpointing_enabled = False
@@ -965,7 +972,8 @@ class PI0Pytorch(nn.Module):
             **collapse_metrics,
         }
 
-    def forward(self, observation, actions, noise=None, time=None) -> Tensor:
+    def forward(self, observation, actions, noise=None, time=None) -> tuple[Tensor, dict[str, Tensor]]:
+        """Return elementwise training losses and detached logging metrics."""
         images, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(observation, train=True)
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
 
@@ -1016,7 +1024,9 @@ class PI0Pytorch(nn.Module):
 
     @torch.no_grad()
     def sample_actions(self, device, observation, noise=None, num_steps=10) -> Tensor:
-        """Do a full inference forward and compute the action (batch_size x num_steps x num_motors)"""
+        """Integrate the flow for num_steps and return (batch, action_horizon, action_dim) actions."""
+        if isinstance(num_steps, bool) or not isinstance(num_steps, int) or num_steps <= 0:
+            raise ValueError(f"num_steps must be a positive integer, got {num_steps!r}")
         bsize = observation.state.shape[0]
         if noise is None:
             actions_shape = (bsize, self.config.action_horizon, self.config.action_dim)
@@ -1157,12 +1167,17 @@ class PI0Pytorch(nn.Module):
         return self.action_out_proj(suffix_out)
     
     def set_training_stage(self, stage: str = "post_training") -> None:
+        if stage not in {"wm_alignment", "post_training"}:
+            raise ValueError(f"Unknown training stage: {stage!r}")
+        if stage == "wm_alignment" and not self.enable_world_model:
+            raise ValueError("Cannot use 'wm_alignment' stage when world model is disabled")
+        # Recompute the complete parameter policy when switching stages.
+        for parameter in self.parameters():
+            parameter.requires_grad = stage == "post_training"
         trainable_modules = []
         frozen_modules = []
 
         if stage == "wm_alignment":
-            if not self.enable_world_model:
-                raise ValueError("Cannot use 'wm_alignment' stage when world model is disabled")
             trainable_modules = [
                 self.paligemma_with_expert.gemma_world_model_expert.model,
                 self.world_pred_head,
@@ -1204,6 +1219,9 @@ class PI0Pytorch(nn.Module):
         for model in frozen_modules:
             for p in model.parameters():
                 p.requires_grad = False
+        if self.world_model_adapter is not None:
+            self.world_model_adapter.encoder_module.eval()
+        self.training_stage = stage
     
     def print_trainable_parameters_auto(self, top_k: int = 40) -> None:
         """Automatically inspect all registered parameters and report trainable status."""
