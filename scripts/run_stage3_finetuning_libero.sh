@@ -20,15 +20,19 @@ STAGE2_EXP_NAME="${STAGE2_EXP_NAME:-${STAGE2_CONFIG}}"
 
 NUM_GPUS="$(default_num_gpus)"
 require_divisible_batch "${CONFIG}" "${NUM_GPUS}" "$@"
-if [[ -z "${STAGE3_INIT_WEIGHT:-}" ]]; then
-  STAGE3_INIT_WEIGHT="$(latest_checkpoint_dir "${CHECKPOINT_DIR}/${STAGE2_CONFIG}/${STAGE2_EXP_NAME}")" || {
-    echo "No Stage II checkpoint under ${CHECKPOINT_DIR}/${STAGE2_CONFIG}/${STAGE2_EXP_NAME}." >&2
-    echo "Run: bash scripts/run_stage2_pretraining.sh" >&2
-    exit 1
-  }
+initialization_args=()
+if ! train_resume_requested "$@"; then
+  if [[ -z "${STAGE3_INIT_WEIGHT:-}" ]]; then
+    STAGE3_INIT_WEIGHT="$(latest_checkpoint_dir "${CHECKPOINT_DIR}/${STAGE2_CONFIG}/${STAGE2_EXP_NAME}")" || {
+      echo "No Stage II checkpoint under ${CHECKPOINT_DIR}/${STAGE2_CONFIG}/${STAGE2_EXP_NAME}." >&2
+      echo "Run: bash scripts/run_stage2_pretraining.sh" >&2
+      exit 1
+    }
+  fi
+  require_checkpoint_dir "${STAGE3_INIT_WEIGHT}"
+  initialization_args+=(--pytorch_weight_path "${STAGE3_INIT_WEIGHT}")
 fi
-require_checkpoint_dir "${STAGE3_INIT_WEIGHT}"
-download_stage_assets 3
+download_stage_assets 3 "$@"
 cd "${ROOT}"
 "$(train_torchrun)" \
     --standalone \
@@ -37,5 +41,5 @@ cd "${ROOT}"
     scripts/train_pytorch.py "${CONFIG}" \
     --exp_name "${EXP_NAME}" \
     --checkpoint_base_dir "${CHECKPOINT_DIR}" \
-    --pytorch_weight_path "${STAGE3_INIT_WEIGHT}" \
+    "${initialization_args[@]}" \
     "$@"

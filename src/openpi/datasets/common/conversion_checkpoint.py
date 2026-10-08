@@ -36,6 +36,44 @@ class EpisodeCheckpointStore:
             return []
         return self._iter_jsonl(self._completed_path)
 
+    def validate_completed_records(
+        self,
+        episode_count: int,
+        selected_keys: set[str],
+        *,
+        allow_tail: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Resolve committed source episodes without assuming a successful source prefix."""
+        by_episode: dict[int, dict[str, Any]] = {}
+        keys: set[str] = set()
+        for record in self.load_completed_records():
+            index = record.get("episode_index")
+            key = str(record.get("key", ""))
+            if not isinstance(index, int) or isinstance(index, bool) or index < 0:
+                raise ValueError(
+                    f"Cannot resume: invalid episode index in {self._completed_path}; rebuild with --overwrite."
+                )
+            if allow_tail and index >= episode_count:
+                continue
+            if index >= episode_count or index in by_episode or key in keys:
+                raise ValueError(
+                    f"Cannot resume: inconsistent completion records in {self._completed_path}; "
+                    "rebuild with --overwrite."
+                )
+            if key not in selected_keys:
+                raise ValueError(
+                    f"Cannot resume: committed source {key!r} is absent from the current selection. "
+                    "Use the original source/task filters or rebuild with --overwrite."
+                )
+            by_episode[index] = record
+            keys.add(key)
+        if set(by_episode) != set(range(episode_count)):
+            raise ValueError(
+                f"Cannot resume: {self._completed_path} does not identify every committed episode. "
+                "Refusing to guess source identities; rebuild with --overwrite."
+            )
+        return [by_episode[index] for index in range(episode_count)]
+
     def load_failed(self) -> list[dict[str, Any]]:
         if not self._failed_path.exists():
             return []

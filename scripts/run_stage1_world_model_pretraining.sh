@@ -24,13 +24,19 @@ export BASE_CHECKPOINT="${BASE_CHECKPOINT:-pi05_base}"
 NUM_GPUS="$(default_num_gpus)"
 require_divisible_batch "${CONFIG}" "${NUM_GPUS}" "$@"
 require_pretraining_data "${CONFIG}"
-if [[ -n "${STAGE1_INIT_WEIGHT:-}" ]]; then require_checkpoint_dir "${STAGE1_INIT_WEIGHT}"; fi
-download_stage_assets 1
-if [[ -z "${STAGE1_INIT_WEIGHT:-}" ]]; then
-  pytorch_dirname="$("$(train_python)" -c 'import os, openpi.training.base_checkpoints as c; print(c.get_base_checkpoint(os.environ["BASE_CHECKPOINT"]).pytorch_dirname)')"
-  STAGE1_INIT_WEIGHT="${ROOT}/checkpoints/${pytorch_dirname}"
+initialization_args=()
+if ! train_resume_requested "$@" && [[ -n "${STAGE1_INIT_WEIGHT:-}" ]]; then
+  require_checkpoint_dir "${STAGE1_INIT_WEIGHT}"
 fi
-require_checkpoint_dir "${STAGE1_INIT_WEIGHT}"
+download_stage_assets 1 "$@"
+if ! train_resume_requested "$@"; then
+  if [[ -z "${STAGE1_INIT_WEIGHT:-}" ]]; then
+    pytorch_dirname="$("$(train_python)" -c 'import os, openpi.training.base_checkpoints as c; print(c.get_base_checkpoint(os.environ["BASE_CHECKPOINT"]).pytorch_dirname)')"
+    STAGE1_INIT_WEIGHT="${ROOT}/checkpoints/${pytorch_dirname}"
+  fi
+  require_checkpoint_dir "${STAGE1_INIT_WEIGHT}"
+  initialization_args+=(--pytorch_weight_path "${STAGE1_INIT_WEIGHT}")
+fi
 cd "${ROOT}"
 "$(train_torchrun)" \
     --standalone \
@@ -39,5 +45,5 @@ cd "${ROOT}"
     scripts/train_pytorch.py "${CONFIG}" \
     --exp_name "${EXP_NAME}" \
     --checkpoint_base_dir "${CHECKPOINT_DIR}" \
-    --pytorch_weight_path "${STAGE1_INIT_WEIGHT}" \
+    "${initialization_args[@]}" \
     "$@"

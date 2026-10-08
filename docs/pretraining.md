@@ -100,10 +100,12 @@ Checkpoint handoff loads `model.safetensors` from the selected step; the destina
 Resume with the same process count, recipe, experiment name, and original training overrides. For the Stage II example above:
 
 ```bash
-.venv/bin/torchrun --standalone --nnodes=1 --nproc_per_node="$NUM_GPUS" \
-  scripts/train_pytorch.py stage2_pretraining --exp-name joint \
+EXP_NAME=joint \
+bash scripts/run_stage2_pretraining.sh \
   --batch-size "$BATCH_SIZE" --resume
 ```
+
+The wrapper restores the latest checkpoint for the current recipe and experiment, including its original normalization assets. Earlier-stage initialization checkpoints are not needed for a resume. Keep the original `CHECKPOINT_DIR` if the run used a custom checkpoint root, and retain `--no-wandb-enabled` if logging was disabled.
 
 Keep the original data sources, sampling weights, temporal schedule, batch size, worker count, number of processes, model, optimizer, and learning-rate schedule. The target `--num-train-steps` and logging/checkpoint intervals may change. Resumable checkpoints include `training_state.pt`, which restores each process's random state, temporal sampling, and next data batch; normalization comes from that step's original `assets/`. Standard Python, NumPy, and PyTorch randomness in workers is replayed. Custom transforms with external state must restore that state themselves.
 

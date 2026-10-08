@@ -62,7 +62,7 @@ ensure_prereqs() {
     fi
     if [ ! -d "${PROJECT_ROOT}/third_party/libero/libero" ]; then
         echo "[ERROR] LIBERO submodule is missing from ${PROJECT_ROOT}/third_party/libero"
-        echo "Run: git submodule update --init --recursive"
+        echo "Run: git submodule update --init third_party/libero"
         exit 1
     fi
     if ! command -v uv >/dev/null 2>&1; then

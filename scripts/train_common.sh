@@ -30,6 +30,17 @@ train_help_requested() {
   return 1
 }
 
+train_resume_requested() {
+  local arg resuming=0
+  for arg in "$@"; do
+    case "${arg}" in
+      --resume) resuming=1 ;;
+      --no-resume) resuming=0 ;;
+    esac
+  done
+  (( resuming == 1 ))
+}
+
 require_divisible_batch() {
   local config_name="$1"
   local num_gpus="$2"
@@ -56,11 +67,14 @@ require_divisible_batch() {
 
 download_stage_assets() {
   local stage="$1"
+  shift
   local python_bin
   python_bin="$(train_python)"
   local extra_args=()
-  if [[ "${stage}" == 1 && -n "${STAGE1_INIT_WEIGHT:-}" ]]; then
-    extra_args+=(--skip-base-checkpoint)
+  if [[ "${stage}" == 1 ]]; then
+    if [[ -n "${STAGE1_INIT_WEIGHT:-}" ]] || train_resume_requested "$@"; then
+      extra_args+=(--skip-base-checkpoint)
+    fi
   fi
   "${python_bin}" "${_TRAIN_ROOT}/scripts/download_assets.py" --stage "${stage}" --checkpoint "${BASE_CHECKPOINT:-pi05_base}" "${extra_args[@]}"
 }

@@ -22,12 +22,14 @@ class Args:
     """Command line arguments."""
 
     # Host and port to connect to the server.
-    host: str = "0.0.0.0"
+    host: str = "localhost"
     # Port of the policy server. serve_policy.py listens on 8001.
     port: int = 8001
     # API key to use for the server.
     api_key: str | None = None
+    # Maximum wait for a connection, in seconds.
     connect_timeout: float = 30.0
+    # Maximum wait for one inference response, in seconds.
     inference_timeout: float = 60.0
     # Number of steps to run the policy for.
     num_steps: int = 20

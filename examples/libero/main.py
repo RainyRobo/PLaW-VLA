@@ -97,12 +97,14 @@ TASK_MAX_STEPS = {
 
 @dataclasses.dataclass
 class Args:
-    host: str = "0.0.0.0"
+    host: str = "localhost"
     port: int = 8001
     resize_size: int = 224
     replan_steps: int = 5
     connect_timeout: float = 30.0
     inference_timeout: float = 60.0
+    # Total wall-clock budget for initialization and a complete rollout.
+    episode_timeout: float = 600.0
 
     task_suite_name: str = "libero_spatial"
     task_ids: Tuple[int, ...] = ()
@@ -383,7 +385,7 @@ def _run_episode_in_subprocess(
     port: int,
     args: Args,
     video_path: str = "",
-    timeout: int = 600,
+    timeout: float = 600.0,
 ) -> bool:
     args_dict = {field.name: getattr(args, field.name) for field in dataclasses.fields(args)}
     args_dict["task_suite_name"] = task_suite_name
@@ -413,7 +415,7 @@ def _run_episode_in_subprocess(
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise TimeoutError(f"LIBERO episode exceeded its {timeout}s subprocess timeout.")
+                raise TimeoutError(f"LIBERO episode exceeded its {timeout:g}s subprocess timeout.")
             try:
                 is_success, error_text = result_queue.get(timeout=min(0.1, remaining))
                 break
@@ -425,7 +427,7 @@ def _run_episode_in_subprocess(
                 raise RuntimeError("LIBERO episode subprocess exited without reporting a result.") from exc
         proc.join(timeout=max(0, deadline - time.monotonic()))
         if proc.is_alive():
-            raise TimeoutError(f"LIBERO episode exceeded its {timeout}s subprocess timeout.")
+            raise TimeoutError(f"LIBERO episode exceeded its {timeout:g}s subprocess timeout.")
         if proc.exitcode != 0:
             raise RuntimeError(f"LIBERO episode subprocess exited with code {proc.exitcode}.")
         if error_text:
@@ -449,7 +451,7 @@ def _validate_args(args: Args) -> None:
         raise ValueError(f"port must be at most 65535, got {args.port}.")
     if args.num_steps_wait < 0:
         raise ValueError(f"num_steps_wait must be nonnegative, got {args.num_steps_wait}.")
-    for name in ("connect_timeout", "inference_timeout"):
+    for name in ("connect_timeout", "inference_timeout", "episode_timeout"):
         value = getattr(args, name)
         if not math.isfinite(value) or value <= 0:
             raise ValueError(f"{name} must be finite and positive, got {value}.")
@@ -543,6 +545,7 @@ def eval_libero(args: Args) -> None:
                 port=args.port,
                 args=args,
                 video_path=video_path,
+                timeout=args.episode_timeout,
             )
             _log(f"Rollout result: task={task_id} trial={episode_idx} seed={args.seed} success={is_success}")
 

@@ -351,7 +351,7 @@ def main() -> None:
     parser.add_argument("--stage", choices=("1", "2", "3", "all"), default="1")
     parser.add_argument("--checkpoint", default="pi05_base", help="Name in openpi.training.base_checkpoints.")
     parser.add_argument(
-        "--skip-base-checkpoint", action="store_true", help="Use an existing initialization checkpoint."
+        "--skip-base-checkpoint", action="store_true", help="Skip downloading and converting the base initialization checkpoint."
     )
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")

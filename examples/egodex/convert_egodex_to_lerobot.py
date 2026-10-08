@@ -274,19 +274,11 @@ def main(args: Args) -> None:
         )
 
     checkpoint = EpisodeCheckpointStore(build_root, namespace="egodex")
-    completed_keys = checkpoint.load_completed()
-    if committed_episodes > 0:
-        bootstrap_records = [
-            {
-                "key": str(job["source_episode_key"]),
-                "episode_index": episode_index,
-            }
-            for episode_index, job in enumerate(episode_jobs[:committed_episodes])
-            if str(job["source_episode_key"]) not in completed_keys
-        ]
-        if bootstrap_records:
-            checkpoint.append_completed_many(bootstrap_records)
-            completed_keys.update(str(record["key"]) for record in bootstrap_records)
+    completed_records = checkpoint.validate_completed_records(
+        committed_episodes,
+        {str(job["source_episode_key"]) for job in episode_jobs},
+    )
+    completed_keys = {str(record["key"]) for record in completed_records}
 
     remaining_jobs: list[dict[str, Any]] = []
     for job in episode_jobs:

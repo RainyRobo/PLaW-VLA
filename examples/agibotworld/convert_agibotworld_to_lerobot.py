@@ -162,12 +162,12 @@ def _select_tasks(
     max_tasks: int | None,
 ) -> list[convert_agibotworld.TaskSpec]:
     tasks = convert_agibotworld._get_all_tasks(src_path)
-    typed_tasks = [(task, _infer_eef_type_from_task(src_path, task)) for task in tasks]
-    tasks = [task for task, inferred_type in typed_tasks if inferred_type == eef_type]
-
     if explicit_task_ids:
         requested = set(explicit_task_ids)
         tasks = [task for task in tasks if task.task_stem in requested]
+
+    typed_tasks = [(task, _infer_eef_type_from_task(src_path, task)) for task in tasks]
+    tasks = [task for task, inferred_type in typed_tasks if inferred_type == eef_type]
 
     if start_task_id is not None:
         normalized_start_task_id = convert_agibotworld._normalize_task_id(start_task_id)
@@ -685,14 +685,6 @@ def _repair_agibot_resume_output_if_needed(
             "Remove the broken output root and rebuild with --overwrite."
         )
 
-    rebuilt_video_paths = _rebuild_missing_video_shards(
-        convert_inner,
-        output_root=output_root,
-        rows=boundary_rows,
-        episode_jobs=episode_jobs,
-        image_sources=image_sources,
-    )
-
     last_row = boundary_rows[-1]
     boundary_episode_count = int(last_row["episode_index"]) + 1
     boundary_frame_count = int(last_row["dataset_to_index"])
@@ -704,7 +696,24 @@ def _repair_agibot_resume_output_if_needed(
         )
     info = json.loads((output_root / "meta" / "info.json").read_text(encoding="utf-8"))
     checkpoint = EpisodeCheckpointStore(output_root, namespace="agibot")
-    completed_records = checkpoint.load_completed_records()
+    original_completed_records = checkpoint.load_completed_records()
+    completed_records = checkpoint.validate_completed_records(
+        boundary_episode_count,
+        {str(job_item["source_episode_key"]) for job_item in episode_jobs},
+        allow_tail=True,
+    )
+    jobs_by_key = {str(job_item["source_episode_key"]): job_item for job_item in episode_jobs}
+    committed_jobs = [
+        {**jobs_by_key[str(record["key"])], "job_index": int(record["episode_index"])}
+        for record in completed_records
+    ]
+    rebuilt_video_paths = _rebuild_missing_video_shards(
+        convert_inner,
+        output_root=output_root,
+        rows=boundary_rows,
+        episode_jobs=committed_jobs,
+        image_sources=image_sources,
+    )
 
     extra_data_paths = _delete_numbered_files_after(
         output_root / "data",
@@ -747,7 +756,7 @@ def _repair_agibot_resume_output_if_needed(
             trimmed_last_data,
             int(info.get("total_episodes", 0)) != boundary_episode_count,
             int(info.get("total_frames", 0)) != boundary_frame_count,
-            len(completed_records) != boundary_episode_count,
+            len(original_completed_records) != boundary_episode_count,
         )
     )
     if not needs_repair:
@@ -758,15 +767,7 @@ def _repair_agibot_resume_output_if_needed(
         total_episodes=boundary_episode_count,
         total_frames=boundary_frame_count,
     )
-    checkpoint.rewrite_completed_records(
-        [
-            {
-                "key": str(job_item["source_episode_key"]),
-                "episode_index": int(job_item["job_index"]),
-            }
-            for job_item in episode_jobs[:boundary_episode_count]
-        ]
-    )
+    checkpoint.rewrite_completed_records(completed_records)
 
     for stale_path in (output_root / "meta" / "stats.json", output_root / "norm_stats.json"):
         if stale_path.exists():

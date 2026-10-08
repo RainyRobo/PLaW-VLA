@@ -113,7 +113,7 @@ _SUPPORTED_WRIST_KEYS = {
 
 @dataclasses.dataclass
 class Args:
-    host: str = "0.0.0.0"
+    host: str = "localhost"
     port: int = 8001
     connect_timeout: float = 30.0
     inference_timeout: float = 60.0
@@ -132,8 +132,7 @@ class Args:
     # the policy is queried at every env step. The executed action at step t is the
     # exponentially-weighted average of overlapping predictions from the most recent
     # `ensemble_window` chunks (weight w_k = exp(-ensemble_decay * k), k = age in steps).
-    # Trades ~replan_steps x extra inference calls for smoother control and (usually)
-    # higher success rate.
+    # Queries the policy at every simulator step instead of once per replanning window.
     action_ensembling: bool = False
     ensemble_window: int = 8
     ensemble_decay: float = 0.1

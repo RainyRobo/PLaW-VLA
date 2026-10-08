@@ -33,9 +33,9 @@ MUJOCO_GL=egl uv run --project examples/libero --frozen python examples/libero/m
 
 By default, the client evaluates every task in the selected suite with 50 trials per task. Use `--task-ids 0 1 2` to select tasks, `--num-trials-per-task` to set the trial count, and `--host` / `--port` to connect to another server. Supported suites are `libero_spatial`, `libero_object`, `libero_goal`, and `libero_10`. The client reads camera keys and temporal sampling from server metadata. Failed-rollout videos go to `results/libero/videos`; use `--record-video all|failure|none` to control recording and `--video-out-path` to change the output directory.
 
-Wait for the server's listening message before starting evaluation. `--connect-timeout` and `--inference-timeout` adjust the connection and response waits in seconds; defaults are 30 and 60, respectively.
+Wait for the server's listening message before starting evaluation. `--connect-timeout` and `--inference-timeout` adjust the connection and response waits in seconds; defaults are 30 and 60, respectively. `--episode-timeout` sets the total time allowed for simulator initialization and one complete rollout, with a default of 600 seconds.
 
-The server uses eager execution by default. For compiled inference, prefix its command with `TORCH_COMPILE_MODE=max-autotune` and set `--inference-timeout 600` on the client; the first inference includes compilation.
+The server uses eager execution by default. For compiled inference, prefix its command with `TORCH_COMPILE_MODE=max-autotune` and set `--inference-timeout 600 --episode-timeout 1200` on the client; the first inference includes compilation. Batch evaluation forwards these options to the client as extra arguments after the selected mode.
 
 For systems using an X display instead of EGL, set `MUJOCO_GL=glx`.
 
