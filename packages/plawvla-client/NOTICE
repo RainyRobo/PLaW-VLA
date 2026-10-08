@@ -1,0 +1,8 @@
+plawvla-client
+Copyright 2024 Physical Intelligence, Inc.
+Modifications Copyright 2026 PLaW-VLA authors
+
+Derived from openpi, distributed under Apache-2.0 (LICENSE).
+plawvla_client/msgpack_numpy.py contains modified msgpack-numpy code,
+Copyright (c) 2013-2022 Lev E. Givon, under BSD-3-Clause.
+The full notice and license are in LICENSES/BSD-3-Clause-msgpack-numpy.txt.

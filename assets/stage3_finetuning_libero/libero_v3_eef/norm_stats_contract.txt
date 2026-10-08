@@ -1,0 +1,1 @@
+libero_eef_v2:state=physical_width:action=absolute_physical_width:canonical_state=open_fraction:canonical_action=ee_delta

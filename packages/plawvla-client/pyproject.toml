@@ -1,0 +1,37 @@
+[project]
+name = "plawvla-client"
+version = "0.1.0"
+description = "Lightweight WebSocket client for PLaW-VLA policy servers"
+license = { file = "LICENSE" }
+requires-python = ">=3.8"
+authors = [{ name = "PLaW-VLA authors" }]
+dependencies = [
+    "dm-tree>=0.1.8",
+    "msgpack>=1.0.5",
+    "numpy>=1.22.4,<2.3.0",
+    "pillow>=9.0.0",
+    "typing-extensions>=4.5.0",
+    "websockets>=11.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = ["pytest>=8.3.4"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py38"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/plawvla_client"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"NOTICE" = "plawvla_client/NOTICE"
+"LICENSES/BSD-3-Clause-msgpack-numpy.txt" = "plawvla_client/LICENSES/BSD-3-Clause-msgpack-numpy.txt"
+
+[tool.hatch.build.targets.sdist.force-include]
+"NOTICE" = "NOTICE"
+"LICENSES/BSD-3-Clause-msgpack-numpy.txt" = "LICENSES/BSD-3-Clause-msgpack-numpy.txt"

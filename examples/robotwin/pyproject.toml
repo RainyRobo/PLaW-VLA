@@ -1,0 +1,65 @@
+[project]
+name = "robotwin-example"
+version = "0.1.0"
+description = "Python environment definition for the PLaW-VLA RoboTwin evaluation client"
+requires-python = ">=3.10,<3.11"
+dependencies = []
+
+[dependency-groups]
+client = [
+    "setuptools<81",
+    "ninja",
+    "numpy==1.26.4",
+    "torch==2.7.1",
+    "torchvision==0.22.1",
+    "transforms3d==0.4.2",
+    "sapien==3.0.0b1",
+    "scipy==1.10.1",
+    "mplib==0.2.1",
+    "gymnasium==0.29.1",
+    "trimesh==4.4.3",
+    "open3d==0.18.0",
+    "toppra",
+    "omegaconf",
+    "einops",
+    "PyYAML",
+    "imageio==2.34.2",
+    "imageio-ffmpeg",
+    "pydantic",
+    "zarr",
+    "openai",
+    "huggingface_hub==0.25.0",
+    "h5py",
+    "azure==4.0.0",
+    "azure-ai-inference",
+    "pyglet<2",
+    "wandb",
+    "moviepy",
+    "termcolor",
+    "av",
+    "matplotlib",
+    "ffmpeg",
+    "plawvla-client",
+    "pytorch3d",
+]
+curobo = [
+    "warp-lang==1.8.0",
+    "nvidia-curobo",
+]
+
+[tool.uv]
+link-mode = "copy"
+no-build-package = ["av"]
+
+[tool.uv.sources]
+plawvla-client = { path = "../../packages/plawvla-client", editable = true }
+pytorch3d = { git = "https://github.com/facebookresearch/pytorch3d.git", rev = "33824be3cbc87a7dd1db0f6a9a9de9ac81b2d0ba" }
+"nvidia-curobo" = { git = "https://github.com/NVlabs/curobo.git", rev = "2fbffc35225398cf9d5f382804faa9de2608753b" }
+
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true

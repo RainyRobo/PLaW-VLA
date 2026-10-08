@@ -1,0 +1,43 @@
+# Training, data, and inference outputs.
+/checkpoints/
+/data/
+/assets/*/
+/policy_records/
+/results/
+/logs/
+/debug/
+wandb/
+*.log
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+
+# Python environments, build products, and caches.
+.env
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.eggs/
+build/
+dist/
+wheels/
+.cache/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.tox/
+.nox/
+.coverage*
+coverage.xml
+htmlcov/
+.ipynb_checkpoints/
+
+# Local editor and assistant state.
+.idea/
+.vscode/
+.codex

@@ -1,0 +1,19 @@
+# Defaults for examples/robotwin/main.py.
+# Concrete values are supplied at launch time via --overrides.
+policy_name: null
+task_name: null
+task_config: null
+ckpt_setting: null
+seed: 0
+expert_check: true
+instruction_type: unseen
+
+# Per-inference execution budget. The stage3 action horizon is 10, so valid
+# values are 1..10. This matches the LIBERO client default of replan_steps=5.
+replan_steps: 5
+
+# Explicit execution semantics for the pinned upstream RoboTwin adapter.
+# Each policy target is one absolute dual-arm EE waypoint passed to
+# TASK_ENV.take_action(..., action_type="ee"). The simulator/planner may use a
+# variable number of inner physics steps, so this is not a fixed-Hz contract.
+robotwin_execution_timing: one_target_per_take_action

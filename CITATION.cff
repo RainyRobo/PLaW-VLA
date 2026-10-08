@@ -1,0 +1,38 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata below."
+title: "PLaW-VLA: Predictive Latent World Modeling for Vision-Language-Action Policies"
+type: software
+version: 0.1.0
+date-released: 2026-10-08
+license: Apache-2.0
+repository-code: "https://github.com/RainyRobo/PLaW-VLA"
+url: "https://rainyrobo.github.io/PLaW-VLA/"
+authors:
+  - family-names: Liu
+    given-names: Yu
+  - family-names: Guo
+    given-names: Hetian
+  - family-names: Huang
+    given-names: Tianlv
+  - family-names: Cai
+    given-names: Ziyi
+  - family-names: Chen
+    given-names: Wudi
+  - family-names: Wang
+    given-names: Hantang
+  - family-names: Liu
+    given-names: Qiutong
+  - family-names: Peng
+    given-names: Yingzhi
+  - family-names: Han
+    given-names: Wei
+  - family-names: Tang
+    given-names: Peijun
+  - family-names: Wang
+    given-names: Jianan
+  - family-names: Fan
+    given-names: Zipei
+  - family-names: Zha
+    given-names: Zhiyuan
+  - family-names: Song
+    given-names: Xuan
