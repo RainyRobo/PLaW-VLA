@@ -191,6 +191,8 @@ def test_download_assets_converts_the_selected_pi05_checkpoint(tmp_path, monkeyp
         (output / "model.safetensors").write_bytes(b"weights")
 
     monkeypatch.setattr(download_assets.subprocess, "run", fake_run)
+    # This dispatch fixture avoids allocating the full foundation checkpoint.
+    monkeypatch.setattr(download_assets, "_base_checkpoint_ready", lambda path: (path / "model.safetensors").is_file())
 
     written = download_assets.ensure_base_checkpoint("pi05_alt")
 

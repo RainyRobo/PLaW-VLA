@@ -74,6 +74,9 @@ class Args:
     episode_offset: int = 0
     episodes_per_task: int | None = None
     keep_extra_fields: bool = False
+    # Calibrated fully open widths for the left and right grippers in millimetres.
+    # Otherwise each episode's largest observed opening defines its unit scale.
+    gripper_max_width_mm: tuple[float, float] | None = None
     resume: bool = False
     overwrite: bool = False
     cleanup_resolved_failures: bool = False
@@ -341,6 +344,7 @@ def _prepare_episode_payload(job: dict[str, Any]) -> dict[str, Any]:
                 task_id,
                 raw_task_config,
                 save_depth=keep_extra_fields,
+                gripper_max_width_mm=job.get("gripper_max_width_mm"),
             )
             num_frames = len(next(iter(state_arrays.values())))
             tasks_per_frame, unlabeled_frames = convert_inner._build_frame_labels(
@@ -359,7 +363,9 @@ def _prepare_episode_payload(job: dict[str, Any]) -> dict[str, Any]:
                 "timestamp": np.arange(num_frames, dtype=np.float32) / float(fps),
             }
             if eef_type == "gripper":
-                state_value, action_value = convert_inner._derive_gripper_state_and_actions(state_arrays, action_arrays)
+                state_value, action_value = convert_inner._derive_gripper_state_and_actions(
+                    state_arrays, action_arrays, gripper_max_width_mm=job.get("gripper_max_width_mm")
+                )
                 episode_columns["observation.state"] = state_value
                 episode_columns["actions"] = action_value
             else:
@@ -871,6 +877,7 @@ def _build_embodiment_dataset(job: dict[str, Any], *, workers: int) -> dict[str,
                         "fps": fps,
                         "image_sources": image_sources,
                         "keep_extra_fields": keep_extra_fields,
+                        "gripper_max_width_mm": job.get("gripper_max_width_mm"),
                         "source_episode_key": _source_episode_key(task.task_id, selection.episode_id),
                     }
                 )
@@ -878,6 +885,13 @@ def _build_embodiment_dataset(job: dict[str, Any], *, workers: int) -> dict[str,
 
         repair_summary: dict[str, Any] | None = None
         if resume and info_path.exists():
+            existing_info = json.loads(info_path.read_text(encoding="utf-8"))
+            if eef_type == "gripper" and (
+                existing_info.get("agibot_eef_conversion_version") != 2
+                or existing_info.get("agibot_gripper_max_width_mm")
+                != (list(job["gripper_max_width_mm"]) if job.get("gripper_max_width_mm") is not None else None)
+            ):
+                raise ValueError("Resume requires the same corrected AgiBot EEF conversion and gripper calibration.")
             repair_summary = _repair_agibot_resume_output_if_needed(
                 convert_inner,
                 output_root=output_root,
@@ -904,6 +918,10 @@ def _build_embodiment_dataset(job: dict[str, Any], *, workers: int) -> dict[str,
                 robot_type="a2d",
                 features=dict(job["features"]),
             )
+            convert_inner._write_dataset_info_labels(
+                output_root, eef_type=eef_type, gripper_max_width_mm=job.get("gripper_max_width_mm")
+            )
+            dataset.meta.info.update(json.loads(info_path.read_text(encoding="utf-8")))
         checkpoint = EpisodeCheckpointStore(output_root, namespace="agibot")
         completed_keys = checkpoint.load_completed()
         episode_jobs = [job_item for job_item in episode_jobs if str(job_item["source_episode_key"]) not in completed_keys]
@@ -1085,7 +1103,9 @@ def _build_embodiment_dataset(job: dict[str, Any], *, workers: int) -> dict[str,
 
         dataset.consolidate(run_compute_stats=not bool(job["skip_stats"]))
         cleaned_failure_records = checkpoint.prune_failures_for_completed(completed_keys) if cleanup_resolved_failures else 0
-        convert_inner._write_dataset_info_labels(output_root, eef_type=eef_type)
+        convert_inner._write_dataset_info_labels(
+            output_root, eef_type=eef_type, gripper_max_width_mm=job.get("gripper_max_width_mm")
+        )
         convert_inner._write_norm_stats(output_root, run_compute_stats=not bool(job["skip_stats"]))
         return {
             "eef_type": eef_type,
@@ -1137,6 +1157,12 @@ def _run_embodiment_job(job: dict[str, Any], *, workers: int) -> dict[str, Any]:
 def main(args: Args) -> None:
     if args.push_to_hub and not args.hub_owner:
         raise ValueError("hub_owner is required when push_to_hub is enabled.")
+    if args.gripper_max_width_mm is not None and (
+        len(args.gripper_max_width_mm) != 2
+        or not np.isfinite(args.gripper_max_width_mm).all()
+        or np.any(np.asarray(args.gripper_max_width_mm) <= 0)
+    ):
+        raise ValueError("--gripper-max-width-mm requires positive finite left and right calibrated widths.")
 
     src = args.src_path.expanduser().resolve()
     if not src.exists():
@@ -1212,13 +1238,14 @@ def main(args: Args) -> None:
                 "selected_task_count": len(selected_tasks),
                 "selected_episode_count": selected_episode_count,
                 "keep_extra_fields": args.keep_extra_fields,
+                "gripper_max_width_mm": args.gripper_max_width_mm,
                 "resume": args.resume,
                 "cleanup_resolved_failures": args.cleanup_resolved_failures,
                 }
         )
 
-    if not jobs:
-        raise ValueError("No AgiBot tasks matched the requested selection.")
+    if not jobs or total_selected_episodes == 0:
+        raise ValueError("No AgiBot episodes matched the requested selection.")
 
     workers = _resolve_conversion_workers(args.conversion_num_workers, total_selected_episodes)
     if not _HAS_RAY and workers > 1 and total_selected_episodes > 1:
@@ -1319,7 +1346,10 @@ def main(args: Args) -> None:
     }
     summary_path = args.summary_json.expanduser().resolve() if args.summary_json else (output_root / "build_summary.json")
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    if args.cleanup_tmp_on_success:
+    failed_results = [
+        item for item in results if item["status"] != "converted" or int(item.get("episodes_failed", 0)) > 0
+    ]
+    if args.cleanup_tmp_on_success and not failed_results:
         cleaned = ray_runtime.cleanup_temp_paths([ray_temp_dir])
         if cleaned:
             CONSOLE.print(f"[green]Cleaned temporary paths:[/green] {', '.join(str(path) for path in cleaned)}")
@@ -1335,6 +1365,12 @@ def main(args: Args) -> None:
             ],
         )
     )
+    if failed_results:
+        reasons = "; ".join(
+            f"{item['eef_type']}: {item.get('error') or str(item['episodes_failed']) + ' episode(s) failed'}"
+            for item in failed_results
+        )
+        raise RuntimeError(f"AgiBot conversion is incomplete ({reasons}); see {summary_path} and resume after fixing the source.")
 
 if __name__ == "__main__":
     main(tyro.cli(Args))

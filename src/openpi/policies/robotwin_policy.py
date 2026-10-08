@@ -20,9 +20,9 @@ Calls to this wrapper must remain serial because they mutate the underlying
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 import logging
 import os
-from collections.abc import Sequence
 from typing import Any
 
 from openpi_client import base_policy as _base_policy
@@ -31,7 +31,6 @@ from typing_extensions import override
 from openpi import transforms as _transforms
 from openpi.policies import policy as _policy
 from openpi.shared import normalize as _normalize
-
 
 _TASK_ID_KEYS = ("__robotwin_task_id__", "task_id", "task_name")
 
@@ -148,7 +147,24 @@ class RobotwinPolicy(_base_policy.BasePolicy):
             return None
         preference = task_config or self._prefer_task_config
         if preference:
-            scored = [c for c in candidates if preference in c]
+            scene_mode = {"demo_clean": "clean", "demo_randomized": "randomized"}.get(preference)
+            if scene_mode is None:
+                scored = [c for c in candidates if preference in c]
+            else:
+                def matches_scene_mode(asset_id: str) -> bool:
+                    suffix = os.path.basename(asset_id).partition("-")[2]
+                    tokens = suffix.replace("-", "_").split("_")
+                    declared_modes = {"clean", "randomized"}.intersection(tokens)
+                    if declared_modes:
+                        return declared_modes == {scene_mode}
+                    # Some task assets use the scene directory with a bare
+                    # task name; embodiment-specific suffixes retain the mode.
+                    parent_mode = {"clean": "clean", "aug": "randomized"}.get(
+                        os.path.basename(os.path.dirname(asset_id))
+                    )
+                    return parent_mode == scene_mode
+
+                scored = [c for c in candidates if matches_scene_mode(c)]
             if scored:
                 candidates = scored
             else:

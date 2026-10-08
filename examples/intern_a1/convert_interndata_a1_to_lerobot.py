@@ -723,7 +723,8 @@ def main(args: Args) -> None:
     }
     summary_path = args.summary_path.expanduser().resolve() if args.summary_path else (output_root / "build_summary.json")
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    if args.cleanup_tmp_on_success:
+    failed_episodes = summary["totals"]["episodes_failed"]
+    if args.cleanup_tmp_on_success and not failed_episodes:
         cleaned = ray_runtime.cleanup_temp_paths([ray_temp_dir])
         if cleaned:
             CONSOLE.print(f"[green]Cleaned temporary paths:[/green] {', '.join(str(path) for path in cleaned)}")
@@ -741,6 +742,11 @@ def main(args: Args) -> None:
             ],
         )
     )
+    if failed_episodes:
+        raise RuntimeError(
+            f"InternData-A1 conversion is incomplete ({failed_episodes} episode(s) failed); "
+            f"see {summary_path} and resume after fixing the source."
+        )
 
 if __name__ == "__main__":
     main(tyro.cli(Args))

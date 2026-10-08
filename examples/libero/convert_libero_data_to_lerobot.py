@@ -21,6 +21,10 @@ Usage:
     python examples/libero/convert_libero_data_to_lerobot.py --data-dir /path/to/rlds --output-dir /path/to/converted/libero
 
 Raw LIBERO RLDS lives at https://huggingface.co/datasets/openvla/modified_libero_rlds.
+Each downloaded suite contains a prepared TFDS directory at
+``<data-dir>/<suite>_no_noops/1.0.0`` with ``features.json``,
+``dataset_info.json``, and the TFRecord shards. The original TFDS builder
+implementation is not required.
 Run this example in a conversion environment with LeRobot, TensorFlow, and
 TensorFlow Datasets installed. Output remains local.
 """
@@ -77,6 +81,13 @@ def convert_libero(data_dir: str, output_dir: pathlib.Path) -> pathlib.Path:
     if output_dir.exists():
         raise FileExistsError(f"Output already exists: {output_dir}; choose a new output directory.")
 
+    data_root = pathlib.Path(data_dir).expanduser()
+    builder_dirs = [data_root / name / "1.0.0" for name in RAW_DATASET_NAMES]
+    for builder_dir in builder_dirs:
+        for metadata_file in ("features.json", "dataset_info.json"):
+            if not (builder_dir / metadata_file).is_file():
+                raise FileNotFoundError(f"Missing prepared TFDS metadata: {builder_dir / metadata_file}")
+
     dataset = LeRobotDataset.create(
         repo_id=REPO_NAME,
         root=output_dir,
@@ -89,8 +100,8 @@ def convert_libero(data_dir: str, output_dir: pathlib.Path) -> pathlib.Path:
     )
 
     try:
-        for raw_dataset_name in RAW_DATASET_NAMES:
-            raw_dataset = tfds.load(raw_dataset_name, data_dir=data_dir, split="train")
+        for builder_dir in builder_dirs:
+            raw_dataset = tfds.builder_from_directory(builder_dir).as_dataset(split="train")
             for episode in raw_dataset:
                 for step in episode["steps"].as_numpy_iterator():
                     dataset.add_frame(

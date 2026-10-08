@@ -50,15 +50,21 @@ Use one source-format workflow per output directory. Outputs are grouped by embo
 
 ## AgiBotWorld
 
-`--src-path` must contain `task_info/`, `observations/`, and `proprio_stats/` directly. The download helper places full datasets in `AgiBotWorld-Alpha` or `AgiBotWorld-Beta` under the selected output directory. For Beta:
+`--src-path` must contain extracted `task_info/`, `observations/`, and `proprio_stats/` directories. The download helper places full datasets in `AgiBotWorld-Alpha` or `AgiBotWorld-Beta` under the selected output directory. Extract the downloaded tar shards before conversion. For Beta:
 
 ```bash
 uv sync --project examples/agibotworld --python 3.12 --frozen
+uv run --project examples/agibotworld --frozen python examples/agibotworld/extract_agibotworld.py \
+  --input-root data/raw/agibotworld/AgiBotWorld-Beta
 uv run --project examples/agibotworld --frozen python examples/agibotworld/convert_agibotworld_to_lerobot.py \
   --src-path data/raw/agibotworld/AgiBotWorld-Beta --output-dir data/pretrain/agibotworld
 ```
 
+The extractor writes raw files beside the downloaded archives. Use `--output-dir` for a separate extracted tree and point the converter's `--src-path` there. Pass the same `--task-ids` to extraction and conversion when preparing a selected task subset.
+
 For Alpha or the sample archive, set `--src-path` to the corresponding extracted raw-data directory. The converter discovers gripper and dexterous-hand tasks, groups outputs by effector, and writes shared camera names with each effector's state/action layout recorded in metadata. `--task-ids`, `--episodes-per-task`, and `--max-tasks` select local subsets. The converter expects the source's 30 Hz frame layout and writes 30 Hz timestamps; the training loader applies time-based sampling.
+
+For gripper tasks, the converter changes the source's `xyzw` rotations to scalar-first `wxyz` and expresses state/action gripper values as closed fractions. The training adapter then maps both to its openness convention. Supply calibrated fully open widths in millimeters with `--gripper-max-width-mm LEFT RIGHT` when available. Without this option, each arm's largest observed width in each episode supplies the reference scale; it is not a fully open calibration. Keep this choice unchanged when resuming conversion and recompute training statistics after changing it.
 
 ## RoboTwin EEF datasets and format upgrades
 
@@ -94,7 +100,26 @@ uv run --project scripts/data --frozen python examples/libero/convert_libero_to_
 
 The default converts 20 Hz demonstrations to 10 Hz. It writes 8D absolute EEF states and next-sample EEF action targets, with scalar-first quaternions and physical gripper widths. Images are rotated to match the LIBERO inference client. Actions are converted to deltas from the current state by the Stage II training transforms. Set `--source-fps` and `--fps` only when they match your source data.
 
-[`convert_libero_data_to_lerobot.py`](../examples/libero/convert_libero_data_to_lerobot.py) separately demonstrates raw RLDS conversion. It requires TensorFlow/TensorFlow Datasets and writes signed 7D controller commands; that output needs a matching custom data config and is not interchangeable with the LIBERO EEF output. Use `converted_libero_data(repo_id, asset_id)` from [config.py](../src/openpi/training/config.py) in a custom recipe to declare its raw state and signed-command conventions. The provided Stage III recipe instead downloads [the prepared LIBERO EEF dataset](https://huggingface.co/datasets/RainyBot/libero_v3_eef).
+The provided Stage III recipe downloads [the prepared LIBERO EEF dataset](https://huggingface.co/datasets/RainyBot/libero_v3_eef).
+
+### Raw LIBERO RLDS
+
+[`convert_libero_data_to_lerobot.py`](../examples/libero/convert_libero_data_to_lerobot.py) is a separate example for [the prepared LIBERO RLDS dataset](https://huggingface.co/datasets/openvla/modified_libero_rlds). It writes raw 8D states (position, rotation vector, and two finger positions) and signed 7D controller commands at 10 Hz. Use a separate CPU conversion environment for TensorFlow and TensorFlow Datasets:
+
+```bash
+uv venv --python 3.12 ../rlds-env
+GIT_LFS_SKIP_SMUDGE=1 uv --no-config pip install --python ../rlds-env/bin/python \
+  --index https://download.pytorch.org/whl/cpu \
+  'torch==2.7.1+cpu' 'torchvision==0.22.1+cpu' \
+  'tensorflow-cpu==2.20.0' 'tensorflow-datasets==4.9.9' \
+  'lerobot @ git+https://github.com/huggingface/lerobot@017ff73fbfe46bf9a673cd9b402988dcb79151f7' tyro
+../rlds-env/bin/hf download openvla/modified_libero_rlds --repo-type dataset \
+  --local-dir data/raw/libero_rlds
+../rlds-env/bin/python examples/libero/convert_libero_data_to_lerobot.py \
+  --data-dir data/raw/libero_rlds --output-dir data/pretrain/libero_rlds
+```
+
+`--no-config` keeps this environment independent of the root training dependency overrides. The input root contains the four `libero_*_no_noops/1.0.0/` directories with their `features.json`, `dataset_info.json`, and TFRecord shards. The converter reads these prepared directories directly. In a custom recipe, use `converted_libero_data(repo_id, asset_id)` from [config.py](../src/openpi/training/config.py) to declare the raw state and signed-command conventions and align the first action with the current frame. This output requires that custom configuration; the default EEF recipe uses absolute poses and physical gripper widths.
 
 ## EgoDex
 

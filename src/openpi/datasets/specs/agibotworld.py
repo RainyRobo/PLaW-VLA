@@ -20,9 +20,9 @@ try:
     import h5py
 except ModuleNotFoundError:
     h5py = None
+from lerobot.datasets.video_utils import get_video_duration_in_s
 import numpy as np
 import pyarrow.parquet as pq
-from lerobot.datasets.video_utils import get_video_duration_in_s
 from tqdm import tqdm
 
 from openpi.datasets.common.lerobot_v3 import DirectVideoLeRobotDataset
@@ -345,6 +345,35 @@ def _video_path_for_key(ob_dir: Path, key: str) -> Path:
     return ob_dir / "videos" / VIDEO_FILENAMES[key]
 
 
+def _gripper_widths_to_closed_fraction(
+    grippers: np.ndarray,
+    *,
+    gripper_max_width_mm: tuple[float, float] | None = None,
+) -> np.ndarray:
+    """Map sensor opening in millimetres to the raw command's 0=open, 1=close convention."""
+    grippers = np.asarray(grippers, dtype=np.float32)
+    if grippers.ndim == 3 and grippers.shape[-1] == 1:
+        grippers = grippers[..., 0]
+    if grippers.ndim != 2 or grippers.shape[1] != 2:
+        raise ValueError(f"Expected bimanual grippers with shape [T, 2], got {grippers.shape}.")
+    if not np.isfinite(grippers).all():
+        raise ValueError("AgiBot gripper widths must be finite.")
+    # Without calibration, the largest observed opening in each episode defines
+    # its scale. This preserves a zero-width closed gripper and a constant open
+    # gripper, but cannot identify an episode's unobserved fully open width.
+    maximum = (
+        np.asarray(gripper_max_width_mm, dtype=np.float32)
+        if gripper_max_width_mm is not None
+        else np.max(grippers, axis=0)
+    )
+    if maximum.shape != (2,) or not np.isfinite(maximum).all() or np.any(maximum < 0):
+        raise ValueError("Expected two finite non-negative gripper maximum widths.")
+    if gripper_max_width_mm is not None and np.any(maximum <= 0):
+        raise ValueError("Calibrated gripper maximum widths must be positive.")
+    openness = np.clip(grippers / np.maximum(maximum, 1e-6), 0.0, 1.0)
+    return (1.0 - openness).astype(np.float32)
+
+
 def _load_episode_arrays(
     episode_id: int,
     src_path: Path,
@@ -352,6 +381,7 @@ def _load_episode_arrays(
     task_config: dict[str, Any],
     *,
     save_depth: bool,
+    gripper_max_width_mm: tuple[float, float] | None = None,
 ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], list[Path], dict[str, Path]]:
     ob_dir = src_path / "observations" / task_id / str(episode_id)
     proprio_dir = src_path / "proprio_stats" / task_id / str(episode_id)
@@ -374,18 +404,53 @@ def _load_episode_arrays(
                     f"expected {num_frames}."
                 )
         for action_key, action_value in list(action.items()):
-            if action_value.size == 0:
-                continue
             if len(action_value) < num_frames:
                 state_key = action_key.replace("actions", "state").replace(".", "/")
-                padded = np.array(f[state_key], dtype=np.float32).copy()
+                # Sensor widths and gripper commands have different units. Fill
+                # the initial interval in command units, then hold the latest
+                # command until the next indexed control signal.
+                is_gripper = (
+                    action_key == "actions.effector.position"
+                    and tuple(task_config["actions"]["effector.position"]["shape"]) == (2,)
+                )
+                if is_gripper:
+                    padded = _gripper_widths_to_closed_fraction(
+                        state["observation.states.effector.position"],
+                        gripper_max_width_mm=gripper_max_width_mm,
+                    )
+                elif state_key in f:
+                    padded = np.array(f[state_key], dtype=np.float32).copy()
+                elif action_key == "actions.robot.velocity":
+                    padded = np.zeros((num_frames, *action_value.shape[1:]), dtype=np.float32)
+                else:
+                    raise ValueError(f"Cannot align sparse action {action_key}: missing matching sensor state.")
+                if not len(action_value):
+                    action[action_key] = padded
+                    continue
                 action_index_key = "/".join(
                     [*action_key.replace("actions", "action").split(".")[:-1], "index"]
                 )
-                action_index = np.array(f[action_index_key])
-                if not action_index.size:
-                    action_index = np.array(f[action_index_key.replace("end", "joint")])
-                padded[action_index] = action_value
+                if action_index_key not in f or not f[action_index_key].size:
+                    action_index_key = action_index_key.replace("/end/", "/joint/")
+                if action_index_key not in f:
+                    raise ValueError(f"Cannot align sparse action {action_key}: missing command index.")
+                action_index = np.asarray(f[action_index_key]).reshape(-1)
+                if (
+                    len(action_index) != len(action_value)
+                    or not np.issubdtype(action_index.dtype, np.integer)
+                    or np.any(action_index < 0)
+                    or np.any(action_index >= num_frames)
+                    or np.any(action_index[1:] <= action_index[:-1])
+                ):
+                    raise ValueError(
+                        f"Sparse action {action_key} requires one strictly increasing in-range index per command."
+                    )
+                if is_gripper:
+                    command_rows = np.searchsorted(action_index, np.arange(num_frames), side="right") - 1
+                    has_command = command_rows >= 0
+                    padded[has_command] = action_value[command_rows[has_command]]
+                else:
+                    padded[action_index] = action_value
                 action[action_key] = padded
             elif len(action_value) > num_frames:
                 raise ValueError(
@@ -422,18 +487,9 @@ def _compute_episode_video_durations(
 def _derive_gripper_state_and_actions(
     state_arrays: dict[str, np.ndarray],
     action_arrays: dict[str, np.ndarray],
+    *,
+    gripper_max_width_mm: tuple[float, float] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    def _normalize_gripper_openness(grippers: np.ndarray) -> np.ndarray:
-        grippers = np.asarray(grippers, dtype=np.float32)
-        if grippers.ndim == 3 and grippers.shape[-1] == 1:
-            grippers = grippers[..., 0]
-        if grippers.ndim != 2 or grippers.shape[1] != 2:
-            raise ValueError(f"Expected bimanual grippers with shape [T, 2], got {grippers.shape}.")
-        min_value = np.min(grippers, axis=0, keepdims=True)
-        max_value = np.max(grippers, axis=0, keepdims=True)
-        denom = np.maximum(max_value - min_value, 1e-6)
-        return np.clip((grippers - min_value) / denom, 0.0, 1.0).astype(np.float32)
-
     def _pack_bimanual_pose_gripper(
         positions: np.ndarray,
         orientations: np.ndarray,
@@ -448,6 +504,11 @@ def _derive_gripper_state_and_actions(
             raise ValueError(f"Expected bimanual positions with shape [T, 2, 3], got {positions.shape}.")
         if orientations.ndim != 3 or orientations.shape[1:] != (2, 4):
             raise ValueError(f"Expected bimanual orientations with shape [T, 2, 4], got {orientations.shape}.")
+        quaternion_norm = np.linalg.norm(orientations, axis=-1, keepdims=True)
+        if not np.isfinite(orientations).all() or np.any(quaternion_norm <= 1e-8):
+            raise ValueError("AgiBot source orientations must be finite nonzero xyzw quaternions.")
+        # The official raw HDF5 schema stores xyzw; the shared EEF layout is wxyz.
+        orientations = (orientations / quaternion_norm)[..., [3, 0, 1, 2]]
         if grippers.ndim != 2 or grippers.shape[1] != 2:
             raise ValueError(f"Expected bimanual grippers with shape [T, 2], got {grippers.shape}.")
         return np.concatenate(
@@ -465,7 +526,9 @@ def _derive_gripper_state_and_actions(
     state_value = _pack_bimanual_pose_gripper(
         state_arrays["observation.states.end.position"],
         state_arrays["observation.states.end.orientation"],
-        _normalize_gripper_openness(state_arrays["observation.states.effector.position"]),
+        _gripper_widths_to_closed_fraction(
+            state_arrays["observation.states.effector.position"], gripper_max_width_mm=gripper_max_width_mm
+        ),
     )
     action_value = _pack_bimanual_pose_gripper(
         action_arrays["actions.end.position"],
@@ -618,7 +681,9 @@ def _write_norm_stats(dataset_root: Path, *, run_compute_stats: bool) -> None:
         json.dump({"norm_stats": norm_stats}, f, indent=2)
 
 
-def _write_dataset_info_labels(dataset_root: Path, *, eef_type: str) -> None:
+def _write_dataset_info_labels(
+    dataset_root: Path, *, eef_type: str, gripper_max_width_mm: tuple[float, float] | None = None
+) -> None:
     info_path = dataset_root / "meta" / "info.json"
     if not info_path.exists():
         raise FileNotFoundError(f"Dataset info.json not found at {info_path}")
@@ -626,6 +691,12 @@ def _write_dataset_info_labels(dataset_root: Path, *, eef_type: str) -> None:
         info = json.load(f)
     info["embodiment"] = eef_type
     info["agibot_eef_type"] = eef_type
+    if eef_type == "gripper":
+        info["agibot_eef_conversion_version"] = 2
+        info["agibot_quaternion_order"] = "wxyz"
+        info["agibot_state_gripper_format"] = "closed_fraction"
+        info["agibot_action_gripper_format"] = "closed_fraction"
+        info["agibot_gripper_max_width_mm"] = list(gripper_max_width_mm) if gripper_max_width_mm is not None else None
     with info_path.open("w", encoding="utf-8") as f:
         json.dump(info, f, indent=2)
 

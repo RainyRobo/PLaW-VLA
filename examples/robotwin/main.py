@@ -10,8 +10,6 @@ from pathlib import Path
 import sys
 
 import cv2
-from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
-import matplotlib.pyplot as plt
 
 # Project layout:
 #   <repo>/examples/robotwin/          <- this file
@@ -51,12 +49,12 @@ from datetime import timezone
 import importlib
 import json
 import math
+import re
 import traceback
 
 import imageio
 import numpy as np
 from openpi_client.websocket_client_policy import WebsocketClientPolicy
-from scipy.spatial.transform import Rotation
 import yaml
 
 # ---------------------------------------------------------------------------
@@ -506,143 +504,15 @@ def add_title_bar(img, text, font_scale=0.8, thickness=2):
     return np.vstack([title_bar, img])
 
 
-def quaternion_to_euler(quat):
-    """
-    Convert quaternion to Euler angles (roll, pitch, yaw) (radians).
-
-    ``quat`` is the canonical openpi/SAPIEN bimanual EE layout ``[qw, qx, qy, qz]``
-    (w-first). scipy's ``Rotation.from_quat`` expects ``[qx, qy, qz, qw]``
-    (w-last), so we have to re-order before calling it -- DO NOT pass the slice
-    directly or every plotted euler angle is silently wrong.
-    """
-    qw, qx, qy, qz = quat
-    rotation = Rotation.from_quat([qx, qy, qz, qw])
-    return rotation.as_euler("xyz", degrees=False)
-
-
-def visualize_action_step(action_history, step_idx, window=50):
-    """
-    Plot dual-arm action curves:
-    Subplot 1: Left arm XYZ Position + Gripper
-    Subplot 2: Left arm Euler angles (Roll, Pitch, Yaw) - converted from quaternion
-    Subplot 3: Right arm XYZ Position + Gripper
-    Subplot 4: Right arm Euler angles (Roll, Pitch, Yaw) - converted from quaternion
-
-    Input data format (canonical openpi bimanual EE-pose layout, w-first quats):
-        [left_x, left_y, left_z, left_qw, left_qx, left_qy, left_qz, left_gripper,
-         right_x, right_y, right_z, right_qw, right_qx, right_qy, right_qz, right_gripper]
-    Total 16 dimensions
-    """
-    # Create four subplots, sharing the X-axis
-    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(14, 8), dpi=100, sharex=True)
-
-    # 1. Determine slice range
-    start = max(0, step_idx - window)
-    end = step_idx + 1
-
-    # 2. Get data subset
-    history_subset = np.array(action_history)[start:end]
-
-    # 3. Generate X-axis based on actual data length
-    actual_len = len(history_subset)
-    x_axis = range(start, start + actual_len)
-
-    if actual_len > 0 and history_subset.shape[1] >= 16:
-        # Convert quaternions to Euler angles
-        left_euler = []
-        right_euler = []
-
-        for action in history_subset:
-            left_quat = action[3:7]  # [qw, qx, qy, qz] - SAPIEN/openpi w-first
-            left_rpy = quaternion_to_euler(left_quat)
-            left_euler.append(left_rpy)
-
-            right_quat = action[11:15]  # [qw, qx, qy, qz]
-            right_rpy = quaternion_to_euler(right_quat)
-            right_euler.append(right_rpy)
-
-        left_euler = np.array(left_euler)
-        right_euler = np.array(right_euler)
-
-        # --- Left Arm ---
-        # Subplot 1: Left Arm Translation (XYZ) + Gripper
-        ax1.plot(x_axis, history_subset[:, 0], label="left_x", color="r", linewidth=1.5)
-        ax1.plot(x_axis, history_subset[:, 1], label="left_y", color="g", linewidth=1.5)
-        ax1.plot(x_axis, history_subset[:, 2], label="left_z", color="b", linewidth=1.5)
-        ax1.plot(x_axis, history_subset[:, 7], label="left_grip", color="orange", linestyle=":", linewidth=2, alpha=0.8)
-        ax1.set_ylabel("Position (m)")
-        ax1.legend(loc="upper right", fontsize="x-small", ncol=4)
-        ax1.grid(visible=True, alpha=0.3)
-        ax1.set_title(f"Step {step_idx}: Left Arm Position & Gripper")
-
-        # Subplot 2: Left Arm Euler Angles (Roll, Pitch, Yaw)
-        ax2.plot(x_axis, left_euler[:, 0], label="left_roll", color="c", linewidth=1.5)
-        ax2.plot(x_axis, left_euler[:, 1], label="left_pitch", color="m", linewidth=1.5)
-        ax2.plot(x_axis, left_euler[:, 2], label="left_yaw", color="y", linewidth=1.5)
-        ax2.set_ylabel("Rotation (rad)")
-        ax2.legend(loc="upper right", fontsize="x-small", ncol=3)
-        ax2.grid(visible=True, alpha=0.3)
-        ax2.set_title("Left Arm Rotation (RPY from Quaternion)")
-
-        # --- Right Arm ---
-        # Subplot 3: Right Arm Translation (XYZ) + Gripper
-        ax3.plot(x_axis, history_subset[:, 8], label="right_x", color="r", linewidth=1.5, linestyle="--")
-        ax3.plot(x_axis, history_subset[:, 9], label="right_y", color="g", linewidth=1.5, linestyle="--")
-        ax3.plot(x_axis, history_subset[:, 10], label="right_z", color="b", linewidth=1.5, linestyle="--")
-        ax3.plot(
-            x_axis, history_subset[:, 15], label="right_grip", color="orange", linestyle=":", linewidth=2, alpha=0.8
-        )
-        ax3.set_ylabel("Position (m)")
-        ax3.legend(loc="upper right", fontsize="x-small", ncol=4)
-        ax3.grid(visible=True, alpha=0.3)
-        ax3.set_title("Right Arm Position & Gripper")
-
-        # Subplot 4: Right Arm Euler Angles (Roll, Pitch, Yaw)
-        ax4.plot(x_axis, right_euler[:, 0], label="right_roll", color="c", linewidth=1.5, linestyle="--")
-        ax4.plot(x_axis, right_euler[:, 1], label="right_pitch", color="m", linewidth=1.5, linestyle="--")
-        ax4.plot(x_axis, right_euler[:, 2], label="right_yaw", color="y", linewidth=1.5, linestyle="--")
-        ax4.set_ylabel("Rotation (rad)")
-        ax4.legend(loc="upper right", fontsize="x-small", ncol=3)
-        ax4.grid(visible=True, alpha=0.3)
-        ax4.set_title("Right Arm Rotation (RPY from Quaternion)")
-
-    # Set X-axis display range to maintain sliding window effect
-    ax1.set_xlim(max(0, step_idx - window), max(window, step_idx))
-    ax3.set_xlabel("Step")
-    ax4.set_xlabel("Step")
-
-    plt.tight_layout()
-    canvas = FigureCanvas(fig)
-    canvas.draw()
-    img = np.asarray(canvas.buffer_rgba())
-    img = img[:, :, :3]
-
-    # Convert to uint8
-    if img.dtype != np.uint8:
-        img = (img * 255).astype(np.uint8)
-
-    plt.close(fig)
-    return img
-
-
-def save_comparison_video(real_obs_list, imagined_video, action_history, save_path, fps=15):
-    if not real_obs_list:
+def save_rollout_video(observations, save_path, fps=15):
+    """Save the actual head and wrist camera observations from a rollout."""
+    if not observations:
         return
-
-    n_real = len(real_obs_list)
-    if imagined_video is not None:
-        imagined_video = np.concatenate(imagined_video, 0)
-        n_imagined = len(imagined_video)
-    else:
-        n_imagined = 0
-    n_frames = n_real  # Based on real observation frames
-
-    print(f"Saving video: Real {n_real} frames, Imagined {n_imagined} frames...")
+    print(f"Saving rollout video with {len(observations)} frames...")
 
     final_frames = []
 
-    for i in range(n_frames):
-        obs = real_obs_list[i]
+    for obs in observations:
         cam_high = obs["observation.images.cam_high"]
         cam_left = obs["observation.images.cam_left_wrist"]
         cam_right = obs["observation.images.cam_right_wrist"]
@@ -662,39 +532,10 @@ def save_comparison_video(real_obs_list, imagined_video, action_history, save_pa
 
         row_real = np.ascontiguousarray(row_real)
 
-        row_real = add_title_bar(row_real, "Real Observation (High / Left / Right)")
-
-        target_width = row_real.shape[1]
-
-        if imagined_video is not None and i < n_imagined:
-            img_frame = imagined_video[i]
-            if img_frame.dtype != np.uint8 and img_frame.max() <= 1.0001:
-                img_frame = (img_frame * 255).astype(np.uint8)
-            elif img_frame.dtype != np.uint8:
-                img_frame = img_frame.astype(np.uint8)
-
-            h = int(img_frame.shape[0] * target_width / img_frame.shape[1])
-            row_imagined = cv2.resize(img_frame, (target_width, h))
-        else:
-            row_imagined = np.zeros((300, target_width, 3), dtype=np.uint8)
-            cv2.putText(
-                row_imagined,
-                "Coming soon",
-                (target_width // 2 - 100, 150),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1,
-                (100, 100, 100),
-                2,
-            )
-
-        row_imagined = np.ascontiguousarray(row_imagined)
-        row_imagined = add_title_bar(row_imagined, "Imagined Video Stream")
-        full_frame = np.vstack([row_real, row_imagined])
-        full_frame = np.ascontiguousarray(full_frame)
-        final_frames.append(full_frame)
+        final_frames.append(add_title_bar(row_real, "Observation (Head / Left wrist / Right wrist)"))
 
     imageio.mimsave(save_path, final_frames, fps=fps)
-    print(f"Combined video saved to: {save_path}")
+    print(f"Rollout video saved to: {save_path}")
 
 
 def class_decorator(task_name):
@@ -705,14 +546,6 @@ def class_decorator(task_name):
     except Exception as exc:
         raise SystemExit(f"Unable to initialize RoboTwin task {task_name}: {exc}") from exc
     return env_instance
-
-
-def eval_function_decorator(policy_name, model_name):
-    try:
-        policy_model = importlib.import_module(policy_name)
-        return getattr(policy_model, model_name)
-    except ImportError as e:
-        raise e
 
 
 def get_embodiment_config(robot_file):
@@ -742,7 +575,7 @@ def main(usr_args):
     args["ckpt_setting"] = ckpt_setting
     args["save_root"] = save_root
 
-    # Comparison-video modes: ``none`` skips encoding, ``failed`` records failed
+    # Rollout-video modes: ``none`` skips encoding, ``failed`` records failed
     # episodes, and ``all`` records every episode. Results are recorded in metrics
     # independently of videos. The simulator's separate recorder is
     # disabled to avoid writing duplicate videos inside its checkout.
@@ -751,12 +584,7 @@ def main(usr_args):
         raise SystemExit(f"ROBOTWIN_VIDEO_MODE must be one of: none, failed, all (got: {_video_mode!r})")
     args["video_mode"] = _video_mode
     args["eval_video_log"] = False
-    print(
-        f"[main] ROBOTWIN_VIDEO_MODE={_video_mode}  "
-        f"(in-sim ffmpeg: OFF, comparison-video: "
-        f"{'ALWAYS' if _video_mode == 'all' else ('FAILURES ONLY' if _video_mode == 'failed' else 'NEVER')})",
-        flush=True,
-    )
+    print(f"[main] Rollout video mode: {_video_mode}", flush=True)
 
     embodiment_type = args.get("embodiment")
     embodiment_config_path = os.path.join(CONFIGS_PATH, "_embodiment_config.yml")
@@ -926,7 +754,7 @@ def main(usr_args):
 
 
 def format_obs(observation, prompt):
-    """Build the single-frame observation used by ``save_comparison_video``.
+    """Build the single-frame observation used by ``save_rollout_video``.
 
     ``make_policy_obs`` builds the separate temporal payload for inference.
     """
@@ -1028,7 +856,7 @@ def eval_policy(
 
         prompt = TASK_ENV.get_instruction()
 
-        # ``video_mode == "none"`` means we never call ``save_comparison_video``,
+        # ``video_mode == "none"`` means we never call ``save_rollout_video``,
         # so don't waste memory accumulating per-frame obs (each entry holds 3
         # RGB frames -> tens-to-hundreds of MB per episode on long horizons).
         # For ``"failed"`` we still need the history because success is only
@@ -1036,7 +864,6 @@ def eval_policy(
         video_mode = args.get("video_mode", "none")
         need_obs_history = video_mode != "none"
         full_obs_list = []
-        full_action_history = []
 
         # Seed the temporal history deque with copies of the first frame (matches
         # how LeRobot clamps out-of-bound offsets at the episode boundary).
@@ -1094,7 +921,6 @@ def eval_policy(
 
             for raw_step in actions:
                 ee_action = normalize_robotwin_ee_action(raw_step, expected_dim=contract.native_action_dim)
-                full_action_history.append(ee_action.copy())
                 TASK_ENV.take_action(ee_action, action_type=contract.action_type)
 
                 next_obs = TASK_ENV.get_obs()
@@ -1121,7 +947,7 @@ def eval_policy(
             if succ:
                 break
 
-        # Comparison-video policy (controlled by ROBOTWIN_VIDEO_MODE):
+        # Rollout-video policy (controlled by ROBOTWIN_VIDEO_MODE):
         #   * mode == "all"    -> always encode <n>_<prompt>_<True|False>.mp4
         #   * mode == "failed" -> encode only on failure
         #   * mode == "none"   -> never write any video file (no placeholder).
@@ -1131,12 +957,11 @@ def eval_policy(
         if should_save_video:
             vis_dir = Path(args["save_root"]) / f"stseed-{st_seed}" / "visualization" / task_name
             vis_dir.mkdir(parents=True, exist_ok=True)
-            video_name = f"{TASK_ENV.test_num}_{prompt.replace(' ', '_')}_{succ}.mp4"
+            safe_prompt = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(prompt)).strip("_")[:120] or "task"
+            video_name = f"{TASK_ENV.test_num}_{safe_prompt}_{succ}.mp4"
             out_img_file = vis_dir / video_name
-            save_comparison_video(
-                real_obs_list=full_obs_list,
-                imagined_video=None,  # gen_video_list,
-                action_history=full_action_history,
+            save_rollout_video(
+                observations=full_obs_list,
                 save_path=str(out_img_file),
                 fps=15,  # Suggest adjusting fps based on simulation step
             )

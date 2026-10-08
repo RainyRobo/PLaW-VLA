@@ -14,7 +14,6 @@ import pathlib
 from typing import Any, ClassVar, Literal, Protocol, TypeAlias
 
 import etils.epath as epath
-import flax.nnx as nnx
 from typing_extensions import override
 import tyro
 
@@ -30,12 +29,9 @@ import openpi.policies.libero_policy as libero_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.optimizer as _optimizer
-import openpi.training.weight_loaders as weight_loaders
 import openpi.transforms as _transforms
 
 ModelType: TypeAlias = _model.ModelType
-# Work around a tyro issue with using nnx.filterlib.Filter directly.
-Filter: TypeAlias = nnx.filterlib.Filter
 
 _LOCAL_REPO_CHILDREN_MANIFEST = ".child_datasets_manifest.json"
 _LOCAL_REPO_CHILDREN_MANIFEST_VERSION = 1
@@ -2215,22 +2211,14 @@ class TrainConfig:
     # define additional attributes.
     model: _model.BaseModelConfig = dataclasses.field(default_factory=pi0_config.Pi0Config)
 
-    # A weight loader can optionally load (possibly partial) weights from disk after the model is initialized.
-    weight_loader: weight_loaders.WeightLoader = dataclasses.field(default_factory=weight_loaders.NoOpWeightLoader)
-
     # Optional path to a PyTorch checkpoint to load weights from.
     pytorch_weight_path: str | None = None
 
     # Precision for PyTorch training.
     pytorch_training_precision: Literal["bfloat16", "float32"] = "bfloat16"
 
-    lr_schedule: _optimizer.LRScheduleConfig = dataclasses.field(default_factory=_optimizer.CosineDecaySchedule)
-    optimizer: _optimizer.OptimizerConfig = dataclasses.field(default_factory=_optimizer.AdamW)
-    ema_decay: float | None = 0.99
-
-    # Specifies which weights should be frozen.
-    freeze_filter: tyro.conf.Suppress[Filter] = dataclasses.field(default_factory=nnx.Nothing)
-
+    lr_schedule: _optimizer.CosineDecaySchedule = dataclasses.field(default_factory=_optimizer.CosineDecaySchedule)
+    optimizer: _optimizer.AdamW = dataclasses.field(default_factory=_optimizer.AdamW)
     # Determines the data to be trained on.
     data: DataConfigFactory = dataclasses.field(default_factory=FakeDataConfig)
 
@@ -2253,8 +2241,6 @@ class TrainConfig:
     log_interval: int = 100
     # How often (in steps) to save checkpoints.
     save_interval: int = 1000
-    # If set, any existing checkpoints matching step % keep_period == 0 will not be deleted.
-    keep_period: int | None = 5000
 
     # If true, will overwrite the checkpoint directory if it already exists.
     overwrite: bool = False
@@ -2288,12 +2274,6 @@ class TrainConfig:
     # Used to pass metadata to the policy server.
     policy_metadata: dict[str, Any] | None = None
 
-    # If the value is greater than 1, FSDP will be enabled and shard across number of specified devices; overall
-    # device memory will be reduced but training could potentially be slower.
-    # eg. if total device is 4 and fsdp devices is 2; then the model will shard to 2 devices and run
-    # data parallel between 2 groups of devices.
-    fsdp_devices: int = 1
-
     @property
     def assets_dirs(self) -> pathlib.Path:
         """Get the assets directory for this config."""
@@ -2306,24 +2286,19 @@ class TrainConfig:
             raise ValueError("--exp_name must be set")
         return (pathlib.Path(self.checkpoint_base_dir) / self.name / self.exp_name).resolve()
 
-    @property
-    def trainable_filter(self) -> nnx.filterlib.Filter:
-        """Get the filter for the trainable parameters."""
-        return nnx.All(nnx.Param, nnx.Not(self.freeze_filter))
-
     def __post_init__(self) -> None:
+        if not isinstance(self.optimizer, _optimizer.AdamW):
+            raise ValueError("PyTorch training supports the AdamW optimizer configuration.")
+        if not isinstance(self.lr_schedule, _optimizer.CosineDecaySchedule):
+            raise ValueError("PyTorch training supports the cosine decay learning-rate schedule configuration.")
         if self.resume and self.overwrite:
             raise ValueError("Cannot resume and overwrite at the same time.")
-        for name in ("batch_size", "num_train_steps", "log_interval", "save_interval", "fsdp_devices"):
+        for name in ("batch_size", "num_train_steps", "log_interval", "save_interval"):
             value = getattr(self, name)
             if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
                 raise ValueError(f"{name} must be a positive integer, got {value!r}.")
         if not isinstance(self.num_workers, int) or isinstance(self.num_workers, bool) or self.num_workers < 0:
             raise ValueError(f"num_workers must be a non-negative integer, got {self.num_workers!r}.")
-        if self.keep_period is not None and (
-            not isinstance(self.keep_period, int) or isinstance(self.keep_period, bool) or self.keep_period <= 0
-        ):
-            raise ValueError(f"keep_period must be a positive integer or None, got {self.keep_period!r}.")
         if not isinstance(self.seed, int) or isinstance(self.seed, bool) or not 0 <= self.seed < 2**32:
             raise ValueError(f"seed must be an integer in [0, 2**32), got {self.seed!r}.")
         if self.training_stage not in ("wm_alignment", "post_training"):
@@ -2488,7 +2463,6 @@ def _stage_train_config(
             decay_lr=decay_lr,
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
-        ema_decay=0.999,
         pytorch_weight_path=None,
         num_train_steps=num_train_steps,
         save_interval=5_000,

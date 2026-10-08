@@ -828,7 +828,7 @@ def train_loop(config: _config.TrainConfig):
             static_graph=bool(ddp_static_graph),
         )
 
-    # Load weights from weight_loader if specified (for fine-tuning)
+    # Load the requested PyTorch initialization for a new training run.
     # Stage handoff validates the foundation and world-model weights before loading.
     if config.pytorch_weight_path is not None and not resuming:
         logging.info(f"Loading PI05 weights from: {config.pytorch_weight_path}")
@@ -897,7 +897,6 @@ def train_loop(config: _config.TrainConfig):
         logging.info(
             f"Optimizer: {type(config.optimizer).__name__}, weight_decay={config.optimizer.weight_decay}, clip_norm={config.optimizer.clip_gradient_norm}"
         )
-        logging.info("EMA is not supported for PyTorch training")
         logging.info(f"Training precision: {model_cfg.dtype}")
 
     # Training loop - iterate until we reach num_train_steps

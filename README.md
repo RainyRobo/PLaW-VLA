@@ -59,7 +59,14 @@ This repository provides the model, training pipeline, data preparation tools, a
 
 ## Installation
 
-Use Linux with an NVIDIA GPU and a driver compatible with CUDA 12.8. Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then run:
+Use Linux (x86_64) with an NVIDIA GPU and a driver compatible with CUDA 12.8. On Ubuntu 22.04, install Git, FFmpeg for data conversion, and the graphics runtime libraries used by the simulator and OpenCV:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y git ffmpeg libgl1 libegl1 libglib2.0-0
+```
+
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then run:
 
 ```bash
 git clone https://github.com/RainyRobo/PLaW-VLA.git
@@ -70,6 +77,8 @@ bash scripts/install_transformers_patch.sh
 ```
 
 The training and policy environment uses PyTorch with CUDA 12.8. The patch installer checks the pinned Transformers version and installs the PLaW-VLA changes only in the project virtual environment. Run it again after synchronizing or recreating that environment. Conversion tools and simulator clients use separate environments. For a containerized policy server, see [Docker](docs/docker.md).
+
+The training scripts use PyTorch DDP: each GPU holds the complete model and optimizer state for its trainable parameters. Select a global batch size that fits the available GPU memory; it is split across the selected devices. The [pretraining guide](docs/pretraining.md#training-options-and-outputs) describes the defaults and overrides.
 
 ## Models and data
 
@@ -89,19 +98,21 @@ PLaW-VLA checkpoints are **pending release**. Until then, evaluation requires a 
 .venv/bin/python scripts/download_assets.py --stage 3
 ```
 
-Downloads are cached and existing resources are reused. **The pretraining mixture is not distributed.** Obtain its five source datasets under their respective terms and follow [the data guide](docs/data.md) to prepare local LeRobot datasets.
+Complete downloaded resources are reused. Rerun the same download command to resume an interrupted dataset download. **The pretraining mixture is not distributed.** Obtain its five source datasets under their respective terms and follow [the data guide](docs/data.md) to prepare local LeRobot datasets.
 
 ## Pretraining
 
-[The pretraining guide](docs/pretraining.md) covers the data layout, Stage I and Stage II recipes, normalization, and checkpoint handoff. Set `DATA_ROOT` to the converted data root; the default is `data/pretrain/` in this repository.
+[The pretraining guide](docs/pretraining.md) covers the data layout, Stage I and Stage II recipes, normalization, and checkpoint handoff. Prepare all five sources and set `DATA_ROOT` to the converted data root; the default is `data/pretrain/` in this repository. The commands below explicitly select one GPU and a global batch of one. Use this small batch for initial setup checks, then choose a batch size and training schedule for your full run.
 
 ```bash
+export NUM_GPUS=1
+export BATCH_SIZE=1
 .venv/bin/python scripts/compute_norm_stats.py --config-name stage2_pretraining
-bash scripts/run_stage1_world_model_pretraining.sh
-bash scripts/run_stage2_pretraining.sh
+bash scripts/run_stage1_world_model_pretraining.sh --batch-size "$BATCH_SIZE"
+bash scripts/run_stage2_pretraining.sh --batch-size "$BATCH_SIZE"
 ```
 
-The stages use the configuration names `stage1_world_model_pretraining`, `stage2_pretraining`, and `stage3_finetuning_libero`. The wrappers accept additional training arguments and use the visible CUDA devices. `NUM_GPUS` must not exceed the visible device count and must divide the total batch size.
+The stages use the configuration names `stage1_world_model_pretraining`, `stage2_pretraining`, and `stage3_finetuning_libero`. The recipes default to global batches of 512, 256, and 256, with 100,000, 100,000, and 50,000 training steps. To check startup and checkpoint handoff first, pass `--num-train-steps 1 --save-interval 1 --no-wandb-enabled` to each wrapper; a one-step checkpoint is useful for checking the pipeline and needs further training for task evaluation. The wrappers accept additional training arguments and use the visible CUDA devices. `NUM_GPUS` must not exceed the visible device count and must divide the total batch size.
 
 ## LIBERO fine-tuning
 
@@ -109,8 +120,8 @@ Stage III starts from a completed Stage II checkpoint. For example:
 
 ```bash
 STAGE3_INIT_WEIGHT=/path/to/stage2/checkpoint/step \
-EXP_NAME=libero \
-bash scripts/run_stage3_finetuning_libero.sh
+EXP_NAME=libero NUM_GPUS=1 \
+bash scripts/run_stage3_finetuning_libero.sh --batch-size "${BATCH_SIZE:-1}"
 ```
 
 Without `STAGE3_INIT_WEIGHT`, the wrapper finds the latest numeric checkpoint under `checkpoints/stage2_pretraining/stage2_pretraining/`. Use `STAGE2_EXP_NAME` if Stage II used another experiment name. Fine-tuning data and normalization statistics are prepared automatically; checkpoints are saved to `checkpoints/stage3_finetuning_libero/libero/<step>/` for the example above. [Normalization details](docs/norm_stats.md) explain the EEF action and gripper conventions.

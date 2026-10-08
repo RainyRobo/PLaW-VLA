@@ -91,11 +91,16 @@ else
         DOWNLOAD_ARGS+=(
             --include "observations/${TASK_ID}/*"
             --include "task_info/task_${TASK_ID}.json"
-            --include "scripts/*"
-            --include "proprio_stats/${TASK_ID}/*"
-            --include "parameters/${TASK_ID}/*"
+            --include "proprio_stats/*"
+            --include "parameters/*"
         )
     fi
     "${HF_CLI}" "${DOWNLOAD_ARGS[@]}"
     echo "Dataset saved to: ${DATASET_DIR}"
+    echo "Extract downloaded tar shards before conversion (from repo root):"
+    printf '  uv run --project examples/agibotworld --frozen python examples/agibotworld/extract_agibotworld.py --input-root %q' "${DATASET_DIR}"
+    if [[ -n "${TASK_ID}" ]]; then
+        printf ' --task-ids %s' "${TASK_ID}"
+    fi
+    printf '\n'
 fi

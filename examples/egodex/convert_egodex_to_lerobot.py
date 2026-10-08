@@ -583,7 +583,9 @@ def main(args: Args) -> None:
     }
     summary_path = args.summary_json.expanduser().resolve() if args.summary_json else (output_root / "build_summary.json")
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    if args.cleanup_tmp_on_success:
+    failed_episodes = summary["totals"]["episodes_failed"]
+    empty_conversion = summary["totals"]["episodes_written"] + summary["totals"]["episodes_already_present"] == 0
+    if args.cleanup_tmp_on_success and not (failed_episodes or empty_conversion):
         cleaned = ray_runtime.cleanup_temp_paths([ray_temp_dir])
         if cleaned:
             CONSOLE.print(f"[green]Cleaned temporary paths:[/green] {', '.join(str(path) for path in cleaned)}")
@@ -601,6 +603,11 @@ def main(args: Args) -> None:
             ],
         )
     )
+    if failed_episodes or empty_conversion:
+        raise RuntimeError(
+            f"EgoDex conversion is incomplete ({failed_episodes} episode(s) failed, "
+            f"{summary['totals']['episodes_skipped']} skipped); see {summary_path} and the source selection."
+        )
 
 if __name__ == "__main__":
     main(tyro.cli(Args))
