@@ -689,6 +689,15 @@ def _write_dataset_info_labels(
         raise FileNotFoundError(f"Dataset info.json not found at {info_path}")
     with info_path.open("r", encoding="utf-8") as f:
         info = json.load(f)
+    for feature in info["features"].values():
+        if feature.get("dtype") != "video" or not feature.get("info"):
+            continue
+        video_info = feature["info"]
+        feature["shape"] = [
+            video_info["video.height"],
+            video_info["video.width"],
+            video_info["video.channels"],
+        ]
     info["embodiment"] = eef_type
     info["agibot_eef_type"] = eef_type
     if eef_type == "gripper":

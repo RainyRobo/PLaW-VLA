@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from contextlib import suppress
+from fractions import Fraction
+import json
 import logging
 import os
 from pathlib import Path
@@ -55,6 +57,34 @@ def _probe_video_duration_s(video_path: Path) -> float:
         return float(result.stdout.strip())
     except ValueError as exc:
         raise RuntimeError(f"ffprobe returned invalid duration for {video_path}: {result.stdout!r}") from exc
+
+
+def _probe_video_stream_duration(video_path: Path) -> Fraction:
+    """Read the video timeline without MP4 movie-header duration rounding."""
+    command = [
+        _ffprobe_path(),
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=duration_ts,time_base",
+        "-of",
+        "json",
+        str(video_path),
+    ]
+    result = subprocess.run(command, check=False, capture_output=True, text=True)
+    if result.returncode != 0:
+        stderr = result.stderr.strip() or result.stdout.strip() or "unknown ffprobe error"
+        raise RuntimeError(f"ffprobe stream duration probe failed for {video_path}: {stderr}")
+    try:
+        stream = json.loads(result.stdout)["streams"][0]
+        duration = int(stream["duration_ts"]) * Fraction(stream["time_base"])
+        if duration <= 0:
+            raise ValueError("Video stream duration must be positive.")
+        return duration
+    except (IndexError, KeyError, TypeError, ValueError, ZeroDivisionError) as exc:
+        raise RuntimeError(f"ffprobe returned no valid video stream duration for {video_path}.") from exc
 
 
 def _probe_seek_first_packet_pts(video_path: Path, timestamp_s: float) -> float:
@@ -130,13 +160,25 @@ def _run_ffmpeg_concat(
     tmp_output_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(mode="w", suffix=".ffconcat", delete=False, encoding="utf-8") as tmp_file:
+            concat_manifest_path = Path(tmp_file.name)
             tmp_file.write("ffconcat version 1.0\n")
+            total_duration = Fraction(0)
+            previous_end_us = 0
+            stream_durations: dict[Path, Fraction] = {}
             for input_path in input_video_paths:
                 resolved_input = Path(input_path).expanduser().resolve()
                 escaped_input = resolved_input.as_posix().replace("'", "'\\''")
                 tmp_file.write(f"file '{escaped_input}'\n")
+                if resolved_input not in stream_durations:
+                    stream_durations[resolved_input] = _probe_video_stream_duration(resolved_input)
+                total_duration += stream_durations[resolved_input]
+                # FFmpeg's concat demuxer uses microseconds. Round cumulative
+                # boundaries so per-episode rounding cannot accumulate drift.
+                end_us = round(total_duration * 1_000_000)
+                duration_us = end_us - previous_end_us
+                tmp_file.write(f"duration {duration_us // 1_000_000}.{duration_us % 1_000_000:06d}\n")
+                previous_end_us = end_us
             tmp_file.flush()
-            concat_manifest_path = Path(tmp_file.name)
 
         with tempfile.NamedTemporaryFile(
             suffix=output_video_path.suffix or ".mp4", dir=output_video_path.parent, delete=False
